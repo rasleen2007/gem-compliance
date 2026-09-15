@@ -1,11 +1,11 @@
-"""Pipeline orchestrator — drives Stages 0-4 from docs/02_core_workflow.md.
+"""Pipeline orchestrator — drives Stages 1-3 from docs/02_core_workflow.md.
 
-Phase P0 flow (single file end-to-end):
-  upload (accepted) -> OCR/text extraction -> rule validation -> result.
+Phase P1 flow:
+  upload (accepted) -> OCR text extraction -> layout parsing (tables/stamps/
+  signatures) -> NLP structuring (parsed_document) -> rule validation.
 
 Jobs run on a background thread pool; `pipeline_events` are persisted to SQLite
-on every transition so the /jobs endpoint (and later dashboard) can rebuild the
-timeline even mid-run.
+on every transition so /jobs and /dashboard can rebuild the timeline.
 """
 
 import threading
@@ -18,8 +18,12 @@ from enum import Enum
 from app.core import db
 from app.core.config import settings
 from core_ai.ocr.extractor import OcrExtractor, StoredDocument
+from core_ai.ocr.layout_parser import LayoutParser
+from core_ai.nlp.entity_extractor import to_parsed_document
 from core_ai.rules.engine import RuleEngine
 from core_ai.rules.rule_registry import RuleRegistry
+from app.schemas.documents import ParsedBundle
+from app.schemas.validation import ValidationResult
 
 
 class Stage(str, Enum):
@@ -47,6 +51,7 @@ class PipelineJob:
     documents: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     extraction: dict | None = None
+    parsed: dict | None = None
     result: dict | None = None
     error: str | None = None
 
@@ -74,7 +79,7 @@ class PipelineJob:
 
 
 # --------------------------------------------------------------------------
-# Job store (in-memory, phase P0) + background executor
+# Job store (in-memory, P0/P1) + background executor
 # --------------------------------------------------------------------------
 _jobs: dict[str, PipelineJob] = {}
 _lock = threading.Lock()
@@ -96,7 +101,6 @@ def get_job(request_id: str) -> PipelineJob | None:
 
 
 def start(job: PipelineJob) -> None:
-    """Kick off the pipeline in a background thread; returns immediately."""
     _executor.submit(run_pipeline, job)
 
 
@@ -107,8 +111,32 @@ def _record(job: PipelineJob, stage: str, status: str, runtime_ms: int = 0, mess
     try:
         db.insert_pipeline_event(job.request_id, job.bid_id, stage, status,
                                  event["ts"], runtime_ms, message)
-    except Exception:  # noqa: BLE001 — event logging must never kill the pipeline
+    except Exception:  # noqa: BLE001 — event logging never kills the pipeline
         pass
+
+
+# --------------------------------------------------------------------------
+# Stage helpers (also used by POST /validate re-runs)
+# --------------------------------------------------------------------------
+def build_parsed(job: PipelineJob, paths: dict[str, str]) -> dict:
+    """Stage 1+2: re-run extraction + layout + NLP for a job's stored documents."""
+    docs = [StoredDocument(file_id=d["file_id"], doc_role=d["doc_role"], path=d["store_path"])
+            for d in job.documents]
+    extraction = OcrExtractor(engine=settings.ocr_engine, lang=settings.ocr_lang).extract(
+        docs, request_id=job.request_id)
+    extraction["tender_id"] = job.tender_id
+    extraction["bid_id"] = job.bid_id
+    LayoutParser().enrich(extraction, paths)
+    return to_parsed_document(extraction, job.request_id, job.tender_id, job.bid_id)
+
+
+def evaluate(job: PipelineJob) -> dict:
+    """Stage 3: run the rule pack against the job's parsed bundle."""
+    rules = db.fetch_rules(job.tender_id)
+    registry = RuleRegistry()
+    registry.load_rules(rules)
+    engine = RuleEngine(registry=registry, llm_enabled=settings.llm_enabled)
+    return engine.evaluate(job.parsed, job.tender_id)
 
 
 # --------------------------------------------------------------------------
@@ -123,40 +151,60 @@ def run_pipeline(job: PipelineJob) -> None:
 
     try:
         _record(job, "upload", "done", 0, f"{len(job.documents)} file(s) accepted")
+        paths = {d["file_id"]: d["store_path"] for d in job.documents}
 
-        # --- Stage 1: OCR / text extraction -------------------------------
+        # --- Stage 1: OCR + layout ----------------------------------------
         job.stage = Stage.OCR_RUNNING
-        _record(job, "ocr", "running", 0, "Extracting text from documents")
+        _record(job, "ocr", "running", 0, "Extracting text and layout regions")
 
         started = time.perf_counter()
         docs = [StoredDocument(file_id=d["file_id"], doc_role=d["doc_role"], path=d["store_path"])
                 for d in job.documents]
         extraction = OcrExtractor(engine=settings.ocr_engine, lang=settings.ocr_lang).extract(
-            docs, request_id=job.request_id
-        )
+            docs, request_id=job.request_id)
         extraction["tender_id"] = job.tender_id
         extraction["bid_id"] = job.bid_id
+        LayoutParser().enrich(extraction, paths)
         job.extraction = extraction
 
         pages = sum(len(d.get("pages", [])) for d in extraction.get("documents", []))
         blocks = sum(len(p.get("text_blocks", []))
                      for d in extraction.get("documents", [])
                      for p in d.get("pages", []))
+        tables = sum(len(p.get("tables", []))
+                     for d in extraction.get("documents", [])
+                     for p in d.get("pages", []))
+        regions = sum(len(p.get("images", []))
+                      for d in extraction.get("documents", [])
+                      for p in d.get("pages", []))
         ocr_ms = int((time.perf_counter() - started) * 1000)
         job.stage = Stage.OCR_COMPLETE
         _record(job, "ocr", "done", ocr_ms,
-                f"{pages} page(s), {blocks} block(s); extraction status={extraction['status']}")
+                f"{pages} page(s), {blocks} block(s), {tables} table(s), {regions} region(s)")
 
-        # --- Stage 3: rule validation (Stage 2 NLP is a no-op in P0) -------
+        # --- Stage 2: NLP structuring --------------------------------------
+        job.stage = Stage.NLP_RUNNING
+        _record(job, "nlp", "running", 0, "Structuring sections and extracting entities")
+
+        started = time.perf_counter()
+        parsed_bundle = to_parsed_document(extraction, job.request_id, job.tender_id, job.bid_id)
+        job.parsed = ParsedBundle.model_validate(parsed_bundle).model_dump()  # contract-3 gate
+
+        n_docs = len(job.parsed.get("documents", []))
+        n_sections = sum(len(d.get("sections", [])) for d in job.parsed.get("documents", []))
+        n_entities = sum(len(d.get("entities", [])) for d in job.parsed.get("documents", []))
+        nlp_ms = int((time.perf_counter() - started) * 1000)
+        job.stage = Stage.NLP_RUNNING
+        _record(job, "nlp", "done", nlp_ms,
+                f"{n_docs} doc(s), {n_sections} section(s), {n_entities} entit(ies)")
+
+        # --- Stage 3: rule validation ---------------------------------------
         job.stage = Stage.VALIDATION_RUNNING
         _record(job, "validation", "running", 0, "Evaluating compliance rules")
 
         started = time.perf_counter()
-        rules = db.fetch_rules(job.tender_id)
-        registry = RuleRegistry()
-        registry.load_rules(rules)
-        engine = RuleEngine(registry=registry, llm_enabled=settings.llm_enabled)
-        job.result = engine.evaluate(extraction, job.tender_id)
+        job.result = evaluate(job)
+        job.result = ValidationResult.model_validate(job.result).model_dump()  # contract-5 gate
 
         db.insert_rule_results(job.bid_id, job.result.get("results", []))
         db.update_bid_status(job.bid_id, job.result["overall_status"])

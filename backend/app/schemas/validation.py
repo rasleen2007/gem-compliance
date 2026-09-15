@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 
 SEVERITIES = ["blocking", "mandatory", "advisory"]
-OPERATORS = [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "llm_judge"]
+OPERATORS = [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "date_before", "llm_judge"]
 RULE_STATUSES = ["pass", "fail", "warn", "skip", "error"]
 
 

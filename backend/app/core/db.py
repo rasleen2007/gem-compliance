@@ -98,8 +98,10 @@ def insert_pipeline_event(request_id: str, bid_id: str, stage: str, status: str,
 
 
 def insert_rule_results(bid_id: str, results: list[dict]) -> None:
+    """Replace a bid's evaluation results (a bid always has exactly one, latest run)."""
     conn = _connect()
     try:
+        conn.execute("DELETE FROM rule_results WHERE bid_id = ?", (bid_id,))
         for r in results:
             conn.execute(
                 "INSERT INTO rule_results (bid_id, rule_id, status, evidence, reason, confidence, suggested_action)"
@@ -132,6 +134,75 @@ def fetch_rules(tender_id: str) -> list[dict]:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Dashboard reads (contract 6)
+# ---------------------------------------------------------------------------
+def get_bid(bid_id: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT bid_id, tender_id, supplier, category, request_id, overall_status, submitted_at"
+            " FROM bids WHERE bid_id = ?", (bid_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_documents(bid_id: str) -> list[dict]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT file_id, file_name, doc_role, stage, stage_status, size_bytes"
+            " FROM documents WHERE bid_id = ?", (bid_id,)).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_rule_results(bid_id: str) -> list[dict]:
+    """Rule results joined with rule metadata; failing/warning first."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT rr.rule_id, rr.status, rr.evidence, rr.reason, rr.confidence,
+                      rr.suggested_action, vr.category, vr.severity, vr.description, vr.element
+               FROM rule_results rr
+               LEFT JOIN validation_rules vr ON vr.rule_id = rr.rule_id
+               WHERE rr.bid_id = ?
+               ORDER BY CASE rr.status WHEN 'fail' THEN 0 WHEN 'warn' THEN 1
+                        WHEN 'error' THEN 2 ELSE 3 END, rr.rule_id""",
+            (bid_id,)).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_events_by_bid(bid_id: str) -> list[dict]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT stage, status, ts, runtime_ms, message
+               FROM pipeline_events
+               WHERE bid_id = ? AND request_id = (
+                   SELECT request_id FROM pipeline_events
+                   WHERE bid_id = ? ORDER BY event_id DESC LIMIT 1)
+               ORDER BY event_id""", (bid_id, bid_id)).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_adjudication(bid_id: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT decision, officer, comment, ts FROM adjudications WHERE bid_id = ?",
+            (bid_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_events(request_id: str) -> list[dict]:
     conn = _connect()
     try:
@@ -148,14 +219,39 @@ def get_events(request_id: str) -> list[dict]:
 # Seeding
 # --------------------------------------------------------------------------
 def _seed_demo_rules(conn: sqlite3.Connection) -> None:
-    """Phase P0 demo rule: EMD amount >= threshold (env-tunable, default 50,000 INR)."""
+    """Phase P1 demo rule pack for the reference tender (contract 4 values).
+
+    Covers all four rule families: EMD amount, document presence (GSTIN/PAN),
+    date comparison (certificate validity / incorporation), financial turnover.
+    """
     threshold = settings.emd_threshold
-    conn.execute(
-        """INSERT OR IGNORE INTO validation_rules
-           (rule_id, tender_id, category, description, severity, element, target, operator, expected_value, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        ("RULE-EMD-001", settings.demo_tender_id, "EMD",
-         f"Earnest Money Deposit (EMD) must be at least {int(float(threshold)):,} INR",
-         "blocking", "all", "EMD_AMOUNT", ">=", threshold,
-         "Phase P0 demo rule — scanned from EMD / financial sections"),
-    )
+    demo_rules = [
+        # --- Rule-EMD: financial threshold on EMD amount -------------------
+        ("RULE-EMD-001", "EMD", "blocking", "all", "EMD_AMOUNT", ">=", threshold,
+         "Earnest Money Deposit (EMD) must be at least "
+         f"{int(float(threshold)):,} INR"),
+        # --- Rule-DOC: mandatory document presence --------------------------
+        ("RULE-DOC-001", "Eligibility", "blocking", "all", "GSTIN", "exists", None,
+         "Supplier GSTIN registration must be present"),
+        ("RULE-DOC-002", "Eligibility", "mandatory", "all", "PAN", "exists", None,
+         "Supplier PAN must be present"),
+        ("RULE-DOC-003", "Financial", "advisory", "financial_bid", "table:PRICE_BREAKUP", "exists", None,
+         "Itemized price breakup table must be attached"),
+        # --- Rule-DATE: dates vs tender deadlines ---------------------------
+        ("RULE-DATE-001", "Certificates", "mandatory", "certificates", "CERT_VALIDITY", "date_after", "2026-06-30",
+         "Certificate/document validity must extend past the tender deadline (2026-06-30)"),
+        ("RULE-DATE-002", "Eligibility", "advisory", "all", "INCORPORATION_DATE", "date_before", "2020-01-01",
+         "Company incorporation date must precede 2020-01-01 (eligibility criterion)"),
+        # --- Rule-FIN: past-years turnover threshold -------------------------
+        ("RULE-FIN-001", "Financial", "mandatory", "financial_bid", "TURNOVER", ">=", "10000000",
+         "Latest financial year turnover must be at least 1,00,00,000 INR (1 crore)"),
+    ]
+    for rule_id, category, severity, element, target, operator, expected, description in demo_rules:
+        conn.execute(
+            """INSERT OR IGNORE INTO validation_rules
+               (rule_id, tender_id, category, description, severity, element, target, operator, expected_value, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (rule_id, settings.demo_tender_id, category, description, severity,
+             element, target, operator, expected,
+             f"Phase P1 demo rule — {operator} against {target}"),
+        )

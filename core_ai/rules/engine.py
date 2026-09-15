@@ -1,17 +1,18 @@
 """Deterministic rule engine (Stage 3). Emits contract 5 (validation_result).
 
-Phase P0 scope (end-to-end EMD demo):
-  - Flattens `ocr_extraction` text into a search corpus.
-  - Operator implementations: numeric compare (EMD amount >= threshold),
-    exists, contains, regex, date_after.
-  - Evidence-backed verdicts: `pass | fail | warn | skip | error` each with
-    found text + source_span (page/char offsets) + confidence.
+Consumes a **parsed_document** bundle (contract 3) produced by the NLP stage,
+evolving the Phase P0 EMD baseline into three new operator families:
 
-Overall status rule (docs/02, contract 5):
-  - any blocking fail            -> DISCREPANT
-  - any mandatory fail/warn      -> NEEDS_REVIEW
-  - any warn/skip                -> NEEDS_REVIEW
-  - otherwise                    -> COMPLIANT
+  Rule-DATE  -> date_after / date_before : extracted document date vs a target
+                tender deadline (e.g. certificate validity, incorporation date).
+  Rule-DOC   -> exists / not_exists      : mandatory attachment presence via
+                entity tokens, table refs, or keyword groupings.
+  Rule-FIN   -> numeric compare on target `TURNOVER` (multi-line financial
+                year turnover parse from the NLP entity index or text scan).
+
+Server-level resilience is preserved: per-rule exceptions degrade to `error`
+status and never abort the batch. All operators run locally — LLM judge remains
+opt-in (skipped when disabled).
 """
 
 import re
@@ -21,15 +22,37 @@ from typing import Any
 from core_ai.rules.rule_registry import RuleRegistry, get_registry
 
 # --------------------------------------------------------------------------
-# Amount parsing (Indian number format + lakh/crore multipliers)
+# Amount / date / entity vocab (shared with NLP where sensible)
 # --------------------------------------------------------------------------
-EMD_KEYWORDS = ("EMD", "Earnest Money Deposit", "Earnest Money", "Deposit")
+EMD_KEYWORDS = ("EMD", "Earnest Money Deposit", "Earnest Money")
 
 _CURRENCY_RE = re.compile(r"(?:INR|Rs\.?|₹)\s*([\d][\d,]*(?:\.\d+)?)\s*(lakh|lac|crore|cr)?", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"([\d][\d,]*(?:\.\d+)?)\s*(lakh|lac|crore|cr)?", re.IGNORECASE)
 _DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
+#: financial-year + amount lines (Year-YY + amount), Indian formats
+_FY_AMOUNT_RE = re.compile(
+    r"(?:(?:F\.?\s?Y\.?|Financial\s+Year)\s*[:.\- ]?\s*)?"
+    r"(\d{4})\s*[-–/]\s*(\d{2,4})"
+    r"\D{0,70}?"
+    r"(?:(?:Rs\.?|INR|₹)\s*)?([\d][\d,]*(?:\.\d+)?)\s*(lakh|lac|crore|cr)?",
+    re.IGNORECASE,
+)
 
 _LIMITS = {"lakh": 100_000, "lac": 100_000, "crore": 10_000_000, "cr": 10_000_000}
+
+#: date-capable entity names (resolution precedence for date rules)
+DATE_ENTITIES = {
+    "CERT_VALIDITY": ("CERT_VALIDITY", "VALIDITY_DATE"),
+    "VALIDITY_DATE": ("CERT_VALIDITY", "VALIDITY_DATE"),
+    "INCORPORATION_DATE": ("INCORPORATION_DATE",),
+}
+
+#: table-presence target -> fallback keyword groupings
+TABLE_TARGETS = {
+    "PRICE_BREAKUP": ("price breakup", "price schedule", "itemized price", "pricing table"),
+}
+
+_SIGNATURE_LIKE = ("signature", "authorized signatory", "stamp")
 
 
 def _to_float(value: str | float, multiplier: str | None) -> float:
@@ -38,37 +61,68 @@ def _to_float(value: str | float, multiplier: str | None) -> float:
 
 
 def _pick_amount(window: str) -> re.Match | None:
-    """First amount in `window`: currency-prefixed preferred, bare number fallback.
+    """First amount in `window`; currency-prefixed preferred, bare number fallback.
 
-    Bare numbers immediately followed by '%' are treated as percentages and skipped.
+    Bare numbers inside `%` contexts are treated as percentages and skipped.
     """
-    m = _CURRENCY_RE.search(window)
-    if m:
-        return m
-    for cand in _NUMBER_RE.finditer(window):
-        if window[cand.end():cand.end() + 4].lstrip().startswith("%"):
+    match = _CURRENCY_RE.search(window)
+    if match:
+        return match
+    for candidate in _NUMBER_RE.finditer(window):
+        if window[candidate.end():candidate.end() + 4].lstrip().startswith("%"):
             continue
-        return cand
+        return candidate
     return None
 
 
-def _search_corpus(parsed: dict):
-    """Yield one chunk per page: {'file_id', 'page', 'text', 'full_text'}."""
-    for document in parsed.get("documents", []):
-        file_id = document.get("file_id")
+def _parse_date_string(raw: Any) -> date | None:
+    if isinstance(raw, date):
+        return raw
+    try:
+        raw_str = str(raw or "").strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", raw_str):
+            return date.fromisoformat(raw_str)
+        day, month, year = re.split(r"[/-]", raw_str)
+        year = int(year)
+        if year < 100:
+            year += 2000 if year < 50 else 1900
+        return date(year, int(day), int(month))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# --------------------------------------------------------------------------
+# Corpus helpers
+# --------------------------------------------------------------------------
+def _iter_documents(parsed: dict):
+    yield from parsed.get("documents", [])
+
+
+def _corpus_chunks(parsed: dict):
+    """Yield searchable text chunks with page/offset provenance.
+
+    Accepts either an `ocr_extraction` (pages) or `parsed_document` (sections)
+    shaped input so the engine tolerates both pipeline stages.
+    """
+    for document in _iter_documents(parsed):
         for page in document.get("pages", []):
-            blocks = " ".join(
-                b.get("text", "") for b in page.get("text_blocks", []) if b.get("text")
-            )
-            yield {
-                "file_id": file_id,
-                "page": page.get("page_no", 1),
-                "text": blocks or page.get("full_text", ""),
-            }
+            yield {"file_id": document.get("file_id"), "page": page.get("page_no", 1),
+                   "text": page.get("full_text", "")}
+        for section in document.get("sections", []):
+            text = (section.get("heading", "") or "") + " " + (section.get("body", "") or "")
+            yield {"file_id": document.get("file_id"), "page": section.get("page", 1), "text": text}
+
+
+def _entities_index(parsed: dict) -> list[dict]:
+    return [entity for document in _iter_documents(parsed) for entity in document.get("entities", [])]
+
+
+def _tables_index(parsed: dict) -> list[dict]:
+    return [table for document in _iter_documents(parsed) for table in document.get("tables_normalized", [])]
 
 
 class RuleEngine:
-    """Evaluates a tender's rule pack against an `ocr_extraction` payload."""
+    """Evaluates a tender's rule pack against a parsed_document bundle."""
 
     def __init__(self, registry: RuleRegistry | None = None,
                  llm_enabled: bool = False, llm_client: Any = None) -> None:
@@ -76,50 +130,53 @@ class RuleEngine:
         self.llm_enabled = llm_enabled
         self.llm_client = llm_client
 
-    # -- public entry point -------------------------------------------------
+    # -- public entry point ------------------------------------------------
     def evaluate(self, parsed: dict, tender_id: str) -> dict:
-        """Return a validation_result dict (contract 5)."""
-        rules = self.registry.for_tender(tender_id)
-        results = [self._apply(rule, parsed) for rule in rules if rule.get("enabled", True)]
-        return self._aggregate(results, parsed, tender_id)
+        rules = [r for r in self.registry.for_tender(tender_id) if r.get("enabled", True)]
+        results = [self._apply(rule, parsed) for rule in rules]
+        return self._aggregate(results, rules, parsed, tender_id)
 
-    # -- per-rule evaluation ------------------------------------------------
+    # -- per-rule -----------------------------------------------------------
     def _apply(self, rule: dict, parsed: dict) -> dict:
         operator = rule.get("operator")
-        target = rule.get("target", "")
-        expected = rule.get("expected_value")
         verdict = {"rule_id": rule.get("rule_id"), "status": "skip",
                    "evidence": {}, "reason": "", "confidence": 1.0,
                    "suggested_action": "none"}
-
         try:
             if operator in (">=", "<=", "==", "!=", ">", "<"):
                 verdict = self._eval_numeric(rule, parsed)
             elif operator in ("exists", "not_exists"):
-                verdict = self._eval_exists(rule, parsed)
+                verdict = self._eval_presence(rule, parsed)
+            elif operator in ("date_after", "date_before"):
+                verdict = self._eval_date(rule, parsed)
             elif operator == "contains":
                 verdict = self._eval_contains(rule, parsed)
             elif operator == "regex":
                 verdict = self._eval_regex(rule, parsed)
-            elif operator == "date_after":
-                verdict = self._eval_date_after(rule, parsed)
-            elif operator == "llm_judge" and not self.llm_enabled:
-                verdict["status"] = "skip"
-                verdict["reason"] = "llm_judge rule skipped: LLM not enabled"
+            elif operator == "llm_judge" and self.llm_enabled:
+                verdict = self._eval_llm(rule, parsed)
             else:
-                verdict["status"] = "skip"
-                verdict["reason"] = f"operator {operator!r} not implemented"
-        except Exception as exc:  # noqa: BLE001 — isolate rule errors
+                verdict["reason"] = (f"operator {operator!r} not enabled{'' if self.llm_enabled else ' (LLM disabled)'}"
+                                     if operator == "llm_judge" else f"operator {operator!r} not implemented")
+        except Exception as exc:  # noqa: BLE001 — batch isolation
             verdict.update({"status": "error", "reason": f"{type(exc).__name__}: {exc}",
                             "confidence": 0.0, "suggested_action": "manual_review"})
         return verdict
 
-    # -- operator implementations ------------------------------------------
+    # -- Rule-FIN / Rule-EMD: numeric comparisons --------------------------
     def _eval_numeric(self, rule: dict, parsed: dict) -> dict:
-        """Numeric comparison — EMD scan for EMD_AMOUNT/EMD_PERCENTAGE targets."""
         target = rule.get("target", "")
-        hit = self._scan_amount(parsed) if target in ("EMD_AMOUNT", "EMD_PERCENTAGE") else self._first_number(parsed)
-        if not hit:
+        hit: dict | None = None
+        if target in ("EMD_AMOUNT", "EMD_PERCENTAGE"):
+            hit = self._scan_amount(parsed)
+        elif target == "TURNOVER" or str(target).startswith("TURNOVER"):
+            turnover = self._turnover_best(parsed)
+            if turnover:
+                hit = turnover["hit"]
+        else:
+            hit = self._first_number(parsed)
+
+        if hit is None:
             return {"rule_id": rule.get("rule_id"), "status": "warn", "evidence": {},
                     "reason": f"No numeric value found for target {target!r}",
                     "confidence": 0.4, "suggested_action": "manual_review"}
@@ -141,150 +198,245 @@ class RuleEngine:
             "suggested_action": "none" if outcome else ("attach_missing_doc" if lhs < rhs else "manual_review"),
         }
 
-    def _eval_exists(self, rule: dict, parsed: dict) -> dict:
-        keyword = rule.get("expected_value") or rule.get("target")
-        hit = self._find_text(parsed, str(keyword))
-        present = hit is not None
-        outcome = present if rule.get("operator") == "exists" else not present
+    # -- Rule-DOC: presence / absence --------------------------------------
+    def _eval_presence(self, rule: dict, parsed: dict) -> dict:
+        target = str(rule.get("target", ""))
+        expected = rule.get("expected_value")
+        corpus = "\n".join(chunk["text"] for chunk in _corpus_chunks(parsed))
+        corpus_lower = corpus.lower()
+        keyword_group: list[str] = [target]
+        evidence: dict = {}
+        present = False
+
+        if target.startswith("table:") or target in TABLE_TARGETS:
+            name = target.removeprefix("table:")
+            def _table_fingerprint(t: dict) -> str:
+                cols = t.get("columns") or []
+                if isinstance(cols, bool):
+                    cols = [str(c) for c in cols] if cols else []
+                return f"{str(t.get('table_id',''))} " + " ".join(str(c) for c in cols).lower()
+            table_present = any(name.lower() in _table_fingerprint(t) for t in _tables_index(parsed))
+            keywords = TABLE_TARGETS.get(name, (name,))
+            text_present = any(kw.lower() in corpus_lower for kw in keywords)
+            present = table_present or text_present
+            evidence = {"found": "detected" if present else None, "source_span": None,
+                        "file_id": None, "table_id": None}
+        else:
+            entity_present = any(
+                e.get("entity") == target or e.get("entity", "").startswith(target + "_")
+                for e in _entities_index(parsed)
+            )
+            keyword_group = [k.strip() for k in re.split(r"[|,]", str(expected or ""))]
+            keyword_group = [k for k in keyword_group if k] or [target]
+            text_present = any(kw.lower() in corpus_lower for kw in keyword_group)
+            present = entity_present or text_present
+            if entity_present:
+                entity = next(
+                    (e for e in _entities_index(parsed)
+                     if e.get("entity") == target or e.get("entity", "").startswith(target + "_")), None)
+                evidence = self._evidence({
+                    "value": entity.get("value"), "page": (entity.get("source_span") or {}).get("page", 1),
+                    "file_id": None, "context": entity.get("value", ""),
+                    "start": (entity.get("source_span") or {}).get("start"),
+                    "end": (entity.get("source_span") or {}).get("end"),
+                })
+            else:
+                for kw in keyword_group:
+                    idx = corpus_lower.find(kw.lower())
+                    if idx != -1:
+                        evidence = {"found": kw, "source_span": {"page": None, "start": idx, "end": idx + len(kw)},
+                                    "file_id": None, "table_id": None}
+                        break
+
+        op = rule.get("operator")
+        outcome = present if op == "exists" else not present
         return {
             "rule_id": rule.get("rule_id"),
             "status": "pass" if outcome else "fail",
-            "evidence": self._evidence(hit) if hit else {},
-            "reason": f"'{keyword}' {'found' if present else 'not found'} in bid documents",
-            "confidence": 0.9 if present else 0.6,
+            "evidence": evidence,
+            "reason": f"{target}: '{keyword_group if op == 'exists' else target}' "
+                      f"{'present' if present else 'not found'} in parsed document",
+            "confidence": 0.9,
             "suggested_action": "none" if outcome else "attach_missing_doc",
         }
 
-    def _eval_contains(self, rule: dict, parsed: dict) -> dict:
-        needle = str(rule.get("expected_value", "")).lower()
-        hit = self._find_text(parsed, needle) if needle else None
-        return {
-            "rule_id": rule.get("rule_id"),
-            "status": "pass" if hit else "fail",
-            "evidence": self._evidence(hit) if hit else {},
-            "reason": f"Text contains {needle!r}: {'yes' if hit else 'no'}",
-            "confidence": 0.9,
-            "suggested_action": "none" if hit else "attach_missing_doc",
-        }
+    # -- Rule-DATE: before/after a deadline ---------------------------------
+    def _eval_date(self, rule: dict, parsed: dict) -> dict:
+        target = str(rule.get("target", ""))
+        required = _parse_date_string(rule.get("expected_value"))
+        hit = self._resolve_date(parsed, target)
+        op = rule.get("operator")
 
-    def _eval_regex(self, rule: dict, parsed: dict) -> dict:
-        pattern = rule.get("expected_value", "")
-        corpus = "\n".join(c["text"] for c in _search_corpus(parsed))
-        if not pattern:
-            return {"rule_id": rule.get("rule_id"), "status": "error", "evidence": {},
-                    "reason": "regex rule missing pattern", "confidence": 0.0,
-                    "suggested_action": "manual_review"}
-        m = re.search(pattern, corpus) if corpus else None
-        return {
-            "rule_id": rule.get("rule_id"),
-            "status": "pass" if m else "fail",
-            "evidence": {"found": (m.group(0) if m else None)} if m else {},
-            "reason": f"regex {pattern!r} {'matched' if m else 'no match'}",
-            "confidence": 0.9 if m else 0.6,
-            "suggested_action": "none" if m else "manual_review",
-        }
-
-    def _eval_date_after(self, rule: dict, parsed: dict) -> dict:
-        expected = rule.get("expected_value")
-        required = date.fromisoformat(str(expected)) if expected else None
-        extracted = None
-        hit = None
-        for chunk in _search_corpus(parsed):
-            m = _DATE_RE.search(chunk["text"])
-            if m:
-                extracted = self._parse_date(m.group(1))
-                hit = {"value": extracted, "page": chunk["page"], "file_id": chunk["file_id"],
-                       "start": m.start(), "end": m.end(), "context": chunk["text"]}
-                break
-        if required is None or extracted is None:
+        if required is None or hit is None:
             return {"rule_id": rule.get("rule_id"), "status": "skip", "evidence": {},
-                    "reason": "no comparable date available", "confidence": 0.5,
+                    "reason": "No comparable date available", "confidence": 0.5,
                     "suggested_action": "manual_review"}
-        outcome = extracted > required
+
+        extracted = hit["value"]
+        outcome = extracted > required if op == "date_after" else extracted < required
         return {
             "rule_id": rule.get("rule_id"),
             "status": "pass" if outcome else "fail",
             "evidence": self._evidence(hit),
-            "reason": f"Date {extracted.isoformat()} > required {required.isoformat()}",
+            "reason": f"{target} {extracted.isoformat()} {op} deadline {required.isoformat()}",
             "confidence": 0.9,
             "suggested_action": "none" if outcome else "attach_missing_doc",
         }
 
+    # -- Text operators ------------------------------------------------------
+    def _eval_contains(self, rule: dict, parsed: dict) -> dict:
+        needle = str(rule.get("expected_value", "")).lower()
+        corpus = "\n".join(chunk["text"] for chunk in _corpus_chunks(parsed))
+        idx = corpus.lower().find(needle) if needle else -1
+        found = idx >= 0
+        return {
+            "rule_id": rule.get("rule_id"),
+            "status": "pass" if found else "fail",
+            "evidence": {"found": needle if found else None,
+                         "source_span": {"start": idx, "end": idx + len(needle)} if found else None},
+            "reason": f"Text contains {needle!r}: {'yes' if found else 'no'}",
+            "confidence": 0.9,
+            "suggested_action": "none" if found else "attach_missing_doc",
+        }
+
+    def _eval_regex(self, rule: dict, parsed: dict) -> dict:
+        pattern = rule.get("expected_value", "")
+        corpus = "\n".join(chunk["text"] for chunk in _corpus_chunks(parsed))
+        if not pattern:
+            return {"rule_id": rule.get("rule_id"), "status": "error", "evidence": {},
+                    "reason": "regex rule missing pattern", "confidence": 0.0,
+                    "suggested_action": "manual_review"}
+        match = re.search(pattern, corpus) if corpus else None
+        return {
+            "rule_id": rule.get("rule_id"),
+            "status": "pass" if match else "fail",
+            "evidence": {"found": match.group(0)} if match else {},
+            "reason": f"regex {pattern!r} {'matched' if match else 'no match'}",
+            "confidence": 0.9 if match else 0.6,
+            "suggested_action": "none" if match else "manual_review",
+        }
+
+    def _eval_llm(self, rule: dict, parsed: dict) -> dict:
+        instruction = rule.get("expected_value") or rule.get("description", "")
+        evidence_text = self._corpus_text(parsed)
+        verdict = self.llm_client.judge(str(instruction), evidence_text) if self.llm_client else {}
+        return {
+            "rule_id": rule.get("rule_id"),
+            "status": verdict.get("verdict", "skip"),
+            "evidence": {"found": verdict.get("reason")},
+            "reason": verdict.get("reason", "llm judge returned no verdict"),
+            "confidence": float(verdict.get("confidence", 0.5)),
+            "suggested_action": "manual_review" if verdict.get("verdict") != "pass" else "none",
+        }
+
     # -- extraction helpers --------------------------------------------------
     @staticmethod
+    def _corpus_text(parsed: dict) -> str:
+        return "\n".join(chunk["text"] for chunk in _corpus_chunks(parsed))
+
+    @staticmethod
     def _scan_amount(parsed: dict) -> dict | None:
-        """Scan for EMD keywords and return the first INR amount that follows."""
-        for chunk in _search_corpus(parsed):
+        """EMD keyword -> amount on the same/multi-line neighbourhood."""
+        for chunk in _corpus_chunks(parsed):
             text = chunk["text"]
             for keyword in EMD_KEYWORDS:
                 idx = text.find(keyword)
                 if idx == -1:
                     continue
                 window = text[idx: idx + 300]
-                m = _pick_amount(window)
-                if m:
-                    return {"value": _to_float(m.group(1), m.group(2)),
+                match = _pick_amount(window)
+                if match:
+                    return {"value": _to_float(match.group(1), match.group(2)),
                             "page": chunk["page"], "file_id": chunk["file_id"],
-                            "start": idx + m.start(), "end": idx + m.end(),
+                            "start": idx + match.start(), "end": idx + match.end(),
                             "context": window.strip()[:300]}
         return None
 
     @staticmethod
-    def _first_number(parsed: dict) -> dict | None:
-        for chunk in _search_corpus(parsed):
-            m = _pick_amount(chunk["text"])
-            if m:
-                return {"value": _to_float(m.group(1), m.group(2)),
-                        "page": chunk["page"], "file_id": chunk["file_id"],
-                        "start": m.start(), "end": m.end(), "context": chunk["text"]}
-        return None
+    def _turnover_best(parsed: dict) -> dict | None:
+        """Best (max) turnover found via entity index, else FY-line text scan."""
+        values: list[dict] = []
+        for entity in _entities_index(parsed):
+            name = str(entity.get("entity", ""))
+            if not name.startswith("TURNOVER"):
+                continue
+            normalized = entity.get("normalized_value")
+            if normalized is None:
+                normalized = _to_float(str(entity.get("value", "")), None)
+            values.append({"value": float(normalized), "page": (entity.get("source_span") or {}).get("page", 1),
+                           "file_id": None, "start": (entity.get("source_span") or {}).get("start"),
+                           "end": (entity.get("source_span") or {}).get("end"),
+                           "context": entity.get("value", "")})
 
-    @staticmethod
-    def _find_text(parsed: dict, needle: str) -> dict | None:
-        needle_lower = (needle or "").lower()
-        if not needle_lower:
+        if not values:
+            for chunk in _corpus_chunks(parsed):
+                for match in _FY_AMOUNT_RE.finditer(chunk["text"]):
+                    values.append({"value": _to_float(match.group(3), match.group(4)),
+                                   "page": chunk["page"], "file_id": chunk["file_id"],
+                                   "start": match.start(), "end": match.end(),
+                                   "context": match.group(0)})
+        if not values:
             return None
-        for chunk in _search_corpus(parsed):
-            idx = chunk["text"].lower().find(needle_lower)
-            if idx != -1:
-                return {"value": needle, "page": chunk["page"], "file_id": chunk["file_id"],
-                        "start": idx, "end": idx + len(needle), "context": chunk["text"]}
+        best = max(values, key=lambda item: item["value"])
+        return {"max": best["value"], "hit": best}
+
+    @staticmethod
+    def _first_number(parsed: dict) -> dict | None:
+        for chunk in _corpus_chunks(parsed):
+            match = _pick_amount(chunk["text"])
+            if match:
+                return {"value": _to_float(match.group(1), match.group(2)),
+                        "page": chunk["page"], "file_id": chunk["file_id"],
+                        "start": match.start(), "end": match.end(), "context": chunk["text"]}
         return None
 
     @staticmethod
-    def _evidence(hit: dict | None) -> dict:
+    def _resolve_date(parsed: dict, target: str) -> dict | None:
+        candidates = DATE_ENTITIES.get(target, (target,))
+        for entity in _entities_index(parsed):
+            if entity.get("entity") not in candidates:
+                continue
+            parsed_date = _parse_date_string(entity.get("normalized_value") or entity.get("value"))
+            if parsed_date:
+                return {"value": parsed_date, "page": (entity.get("source_span") or {}).get("page", 1),
+                        "file_id": None,
+                        "start": (entity.get("source_span") or {}).get("start"),
+                        "end": (entity.get("source_span") or {}).get("end"),
+                        "context": entity.get("value", "")}
+        for chunk in _corpus_chunks(parsed):
+            match = _DATE_RE.search(chunk["text"])
+            if match:
+                parsed_date = _parse_date_string(match.group(1))
+                if parsed_date:
+                    return {"value": parsed_date, "page": chunk["page"], "file_id": chunk["file_id"],
+                            "start": match.start(), "end": match.end(), "context": chunk["text"]}
+        return None
+
+    @staticmethod
+    def _evidence(hit: dict) -> dict:
         if not hit:
             return {}
-        span = {"page": hit["page"]}
+        span: dict = {"page": hit.get("page")}
         if hit.get("start") is not None:
             span["start"] = hit["start"]
             span["end"] = hit["end"]
         return {"found": hit.get("context", ""), "source_span": span, "file_id": hit.get("file_id")}
 
+    # -- aggregation ----------------------------------------------------------
     @staticmethod
-    def _parse_date(raw: str) -> date:
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
-            return date.fromisoformat(raw)
-        day, month, year = re.split(r"[/-]", raw)
-        year = int(year)
-        if year < 100:
-            year += 2000 if year < 50 else 1900
-        return date(year, int(day), int(month))
-
-    # -- aggregation ---------------------------------------------------------
-    @staticmethod
-    def _aggregate(results: list[dict], parsed: dict, tender_id: str) -> dict:
-        def count(status: str) -> int:
-            return sum(1 for r in results if r["status"] == status)
-
+    def _aggregate(results: list[dict], rules: list[dict], parsed: dict, tender_id: str) -> dict:
+        severity = {r.get("rule_id"): r.get("severity") for r in rules}
+        num_fail = sum(1 for r in results if r["status"] == "fail")
+        num_blocking_fail = sum(
+            1 for r in results if r["status"] == "fail" and severity.get(r.get("rule_id")) == "blocking")
+        num_mandatory_fail = sum(
+            1 for r in results if r["status"] == "fail" and severity.get(r.get("rule_id")) == "mandatory")
+        num_pass = sum(1 for r in results if r["status"] == "pass")
         total = len(results)
-        pass_count = count("pass")
-        # Docs/02 severity model: blocking fail => DISCREPANT, otherwise any
-        # warn/skip => NEEDS_REVIEW, else COMPLIANT. (Severity field is
-        # carried on rules, not results; the registry orders blocking first.)
-        if any(r["status"] == "fail" for r in results):
+
+        if num_blocking_fail:
             overall = "DISCREPANT"
-        elif any(r["status"] in ("warn", "skip") for r in results):
+        elif num_mandatory_fail or any(r["status"] in ("warn", "skip") for r in results):
             overall = "NEEDS_REVIEW"
         else:
             overall = "COMPLIANT"
@@ -294,14 +446,18 @@ class RuleEngine:
             "tender_id": parsed.get("tender_id") or tender_id,
             "bid_id": parsed.get("bid_id"),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "engine_version": "1.0",
+            "engine_version": "1.1",
             "results": results,
             "overall_status": overall,
             "score": {
-                "blocking": 0, "mandatory": 0, "advisory": 0,
-                "pass": pass_count, "fail": count("fail"), "warn": count("warn"),
-                "skip": count("skip"), "error": count("error"),
+                "blocking": sum(1 for r in rules if severity.get(r.get("rule_id")) == "blocking"),
+                "mandatory": sum(1 for r in rules if severity.get(r.get("rule_id")) == "mandatory"),
+                "advisory": sum(1 for r in rules if severity.get(r.get("rule_id")) == "advisory"),
+                "pass": num_pass, "fail": num_fail,
+                "warn": sum(1 for r in results if r["status"] == "warn"),
+                "skip": sum(1 for r in results if r["status"] == "skip"),
+                "error": sum(1 for r in results if r["status"] == "error"),
                 "total": total,
-                "compliance_pct": round(pass_count / total * 100, 1) if total else 0.0,
+                "compliance_pct": round(num_pass / total * 100, 1) if total else 0.0,
             },
         }

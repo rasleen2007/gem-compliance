@@ -1,6 +1,7 @@
 """Rule registry — loads validation_rule entries (contract 4) for a tender.
 
-Sources: database_schema seed tables (primary) or an uploaded rule-pack file.
+Sources: database_schema seed tables (via app.core.db.fetch_rules) or programmatic
+loads (tests, rule-pack files). Deduplicates by rule_id.
 """
 
 from typing import Iterable
@@ -12,10 +13,21 @@ class RuleRegistry:
 
     def load_rules(self, rules: Iterable[dict]) -> None:
         for rule in rules:
-            self._by_tender.setdefault(rule["tender_id"], []).append(rule)
+            self.add(rule)
+
+    def add(self, rule: dict) -> None:
+        tender_id = rule.get("tender_id")
+        if not tender_id:
+            return
+        bucket = self._by_tender.setdefault(tender_id, [])
+        if all(existing.get("rule_id") != rule.get("rule_id") for existing in bucket):
+            bucket.append(rule)
 
     def for_tender(self, tender_id: str) -> list[dict]:
-        return self._by_tender.get(tender_id, [])
+        return list(self._by_tender.get(tender_id, []))
+
+    def clear(self) -> None:
+        self._by_tender.clear()
 
 
 _default_registry = RuleRegistry()

@@ -20,7 +20,7 @@
     },
     "operator": {
       "type": "string",
-      "enum": [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "llm_judge"]
+      "enum": [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "date_before", "llm_judge"]
     },
     "expected_value": {
       "description": "Static comparison value; for llm_judge this is the instruction text",
