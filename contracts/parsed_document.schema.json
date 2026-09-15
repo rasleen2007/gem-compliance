@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "parsed_document.schema.json",
+  "title": "ParsedDocument",
+  "description": "Output of core_ai/nlp. Structured, rule-ready view of one document: sections, key-value pairs, typed entities, normalized tables.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "tender_id", "bid_id", "documents", "status"],
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "tender_id": { "type": "string" },
+    "bid_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["completed", "partial", "failed"] },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file_id", "doc_role", "sections", "key_value_pairs", "entities", "confidence"],
+        "properties": {
+          "file_id": { "type": "string", "format": "uuid" },
+          "doc_role": { "type": "string" },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["section_id", "heading", "body"],
+              "properties": {
+                "section_id": { "type": "string" },
+                "heading": { "type": "string" },
+                "body": { "type": "string" },
+                "keywords": { "type": "array", "items": { "type": "string" } },
+                "page": { "type": "integer", "minimum": 1 },
+                "entities": { "$ref": "#/definitions/entity" },
+                "tables_normalized": { "type": "array", "items": { "type": "string" }, "description": "table_keys referenced by this section" }
+              }
+            }
+          },
+          "key_value_pairs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "value", "confidence"],
+              "properties": {
+                "key": { "type": "string" },
+                "value": { "type": "string" },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "source_span": { "$ref": "#/definitions/source_span" }
+              }
+            }
+          },
+          "entities": { "$ref": "#/definitions/entity" },
+          "tables_normalized": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["table_id", "columns", "rows"],
+              "properties": {
+                "table_id": { "type": "string" },
+                "columns": { "type": "array", "items": { "type": "string" } },
+                "rows": {
+                  "type": "array",
+                  "items": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          },
+          "summary": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "entity": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entity", "value", "confidence"],
+        "properties": {
+          "entity": { "type": "string", "example": "EMD_PERCENTAGE" },
+          "value": { "type": "string" },
+          "normalized_value": { "type": ["string", "number", "boolean"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "source_span": { "$ref": "#/definitions/source_span" }
+        }
+      }
+    },
+    "source_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page"],
+      "properties": {
+        "page": { "type": "integer", "minimum": 1 },
+        "start": { "type": "integer", "minimum": 0, "description": "char offset in page full_text" },
+        "end": { "type": "integer", "minimum": 0 },
+        "bbox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+      }
+    }
+  }
+}

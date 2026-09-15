@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic>=2.0
+python-multipart
+sqlalchemy>=2.0
+pymupdf
+pdfplumber
+pillow
+paddleocr          # MVP OCR engine
+paddlepaddle
+spacy
+spacy-transformers
+openai             # optional LLM adapter (see .env LLM_ENABLED)
+jsonschema         # contract validation in tests

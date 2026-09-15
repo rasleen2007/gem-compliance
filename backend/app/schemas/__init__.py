@@ -1,0 +1,1 @@
+"""Pydantic schemas mirroring contracts/*.schema.json — the inter-module contracts."""

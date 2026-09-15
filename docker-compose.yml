@@ -1,0 +1,23 @@
+# MVP dev bring-up. backend = uvicorn, frontend = vite preview.
+# Mounts ./data and ./uploads so SQLite + uploaded originals survive rebuilds.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend

@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "document_upload.schema.json",
+  "title": "DocumentUpload",
+  "description": "Request payload for POST /api/v1/upload. Client tags files with roles; server returns request_id and accepted job.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tender_id", "bid_id", "supplier", "category", "files"],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Optional client-supplied idempotency key; otherwise server assigns."
+    },
+    "tender_id": { "type": "string", "minLength": 1, "example": "GeM/2026/B/123456" },
+    "bid_id": { "type": "string", "minLength": 1, "example": "bid-2026-001" },
+    "supplier": { "type": "string", "example": "Acme Industries Pvt Ltd" },
+    "category": { "type": "string", "example": "Petroleum Products" },
+    "submitted_at": { "type": "string", "format": "date-time" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file_name", "file_type", "doc_role"],
+        "properties": {
+          "file_id": { "type": "string", "format": "uuid" },
+          "file_name": { "type": "string", "minLength": 1 },
+          "file_type": { "type": "string", "enum": ["pdf", "image", "docx"] },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "doc_role": {
+            "type": "string",
+            "enum": ["technical_bid", "financial_bid", "emd", "certificates", "annexure"]
+          }
+        }
+      }
+    }
+  }
+}

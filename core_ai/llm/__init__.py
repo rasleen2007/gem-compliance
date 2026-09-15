@@ -1,0 +1,1 @@
+"""Optional LLM 'judge' adapter (free-text rules). Disabled unless LLM_ENABLED=true."""

@@ -1,0 +1,1 @@
+"""NLP structuring package (Stage 2 of pipeline). Emits contract 3 (parsed_document)."""

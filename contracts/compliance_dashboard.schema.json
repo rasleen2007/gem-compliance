@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "compliance_dashboard.schema.json",
+  "title": "ComplianceDashboard",
+  "description": "Aggregate payload returned by GET /api/v1/dashboard/{bid_id} to render the review UI.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bid_id", "tender_id", "supplier", "status", "score", "issues", "timeline"],
+  "properties": {
+    "tender_id": { "type": "string" },
+    "bid_id": { "type": "string" },
+    "supplier": { "type": "string" },
+    "category": { "type": "string" },
+    "status": { "type": "string", "enum": ["COMPLIANT", "DISCREPANT", "NEEDS_REVIEW", "IN_PROGRESS"] },
+    "score": {
+      "type": "object",
+      "properties": {
+        "pass": { "type": "integer" },
+        "fail": { "type": "integer" },
+        "warn": { "type": "integer" },
+        "skip": { "type": "integer" },
+        "error": { "type": "integer" },
+        "total": { "type": "integer" },
+        "compliance_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "category_breakdown": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": { "type": "string" },
+          "pass": { "type": "integer" },
+          "fail": { "type": "integer" },
+          "warn": { "type": "integer" },
+          "total": { "type": "integer" }
+        }
+      }
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file_id": { "type": "string" },
+          "file_name": { "type": "string" },
+          "doc_role": { "type": "string" },
+          "stage": { "type": "string", "enum": ["uploaded", "ocr_done", "parsed", "validated", "failed"] },
+          "status": { "type": "string", "enum": ["ok", "error", "partial"] }
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rule_id": { "type": "string" },
+          "category": { "type": "string" },
+          "severity": { "type": "string", "enum": ["blocking", "mandatory", "advisory"] },
+          "status": { "type": "string", "enum": ["pass", "fail", "warn", "skip", "error"] },
+          "summary": { "type": "string" },
+          "evidence": { "type": "string" },
+          "source_span": { "type": "object" },
+          "suggested_action": { "type": "string" }
+        }
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stage": { "type": "string", "enum": ["upload", "ocr", "nlp", "validation", "adjudication"] },
+          "status": { "type": "string", "enum": ["pending", "running", "done", "error"] },
+          "ts": { "type": "string", "format": "date-time" },
+          "runtime_ms": { "type": "integer" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "adjudication": {
+      "type": "object",
+      "properties": {
+        "decision": { "type": "string", "enum": ["approved", "rejected", "rework_requested"] },
+        "officer": { "type": "string" },
+        "comment": { "type": "string" },
+        "ts": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

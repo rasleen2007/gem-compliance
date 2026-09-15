@@ -1,0 +1,1 @@
+"""Rules engine (Stage 3 of pipeline). Emits contract 5 (validation_result)."""

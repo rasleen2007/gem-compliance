@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "validation_rule.schema.json",
+  "title": "ValidationRule",
+  "description": "A single compliance rule from a tender rule pack. Consumed by core_ai/rules engine. Stored in database_schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rule_id", "tender_id", "category", "description", "severity", "element", "target", "operator"],
+  "properties": {
+    "rule_id": { "type": "string", "example": "RULE-EMD-001" },
+    "tender_id": { "type": "string", "example": "GeM/2026/B/123456" },
+    "category": { "type": "string", "example": "EMD" },
+    "description": { "type": "string", "example": "EMD amount must be >= 2% of quoted value via BG/DD" },
+    "severity": { "type": "string", "enum": ["blocking", "mandatory", "advisory"] },
+    "element": { "type": "string", "enum": ["technical_bid", "financial_bid", "emd", "certificates", "all"], "description": "Which uploaded document(s) this rule inspects" },
+    "target": {
+      "type": "string",
+      "description": "Entity/pair/table key to evaluate, e.g. EMD_PERCENTAGE, kv.GSTIN, word('valid until')",
+      "example": "EMD_PERCENTAGE"
+    },
+    "operator": {
+      "type": "string",
+      "enum": [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "llm_judge"]
+    },
+    "expected_value": {
+      "description": "Static comparison value; for llm_judge this is the instruction text",
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "expression": { "type": "string", "description": "Optional compound condition (AND/OR) referencing other targets" },
+    "notes": { "type": "string" },
+    "enabled": { "type": "boolean", "default": true }
+  }
+}

@@ -1,0 +1,1 @@
+"""Service layer: pipeline orchestration and file/db storage."""

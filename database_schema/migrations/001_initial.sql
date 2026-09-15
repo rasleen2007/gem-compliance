@@ -1,0 +1,3 @@
+-- 001_initial.sql — port of schema.sql to Postgres (future phase).
+-- Differences from SQLite: BIGSERIAL, timestamptz, ON UPDATE CASCADE,
+-- name -> VARCHAR sizes. Run via alembic when migrating off SQLite.

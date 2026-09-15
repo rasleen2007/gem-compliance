@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ocr_extraction.schema.json",
+  "title": "OcrExtraction",
+  "description": "Output of core_ai/ocr. Page-aware raw extraction: text blocks, tables, images/stamps with confidence and bounding boxes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "documents", "status"],
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "tender_id": { "type": "string" },
+    "bid_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["completed", "partial", "failed"] },
+    "errors": {
+      "type": "array",
+      "items": { "type": "object", "properties": { "file_id": { "type": "string" }, "message": { "type": "string" } } }
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file_id", "doc_role", "pages", "meta"],
+        "properties": {
+          "file_id": { "type": "string", "format": "uuid" },
+          "doc_role": { "type": "string", "enum": ["technical_bid", "financial_bid", "emd", "certificates", "annexure"] },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["page_no", "text_blocks", "tables", "images", "full_text"],
+              "properties": {
+                "page_no": { "type": "integer", "minimum": 1 },
+                "page_w": { "type": "number" },
+                "page_h": { "type": "number" },
+                "dpi": { "type": "integer" },
+                "text_blocks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["block_id", "text", "conf", "bbox", "block_type"],
+                    "properties": {
+                      "block_id": { "type": "string" },
+                      "text": { "type": "string" },
+                      "conf": { "type": "number", "minimum": 0, "maximum": 1 },
+                      "bbox": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "description": "[x1, y1, x2, y2]"
+                      },
+                      "block_type": {
+                        "type": "string",
+                        "enum": ["heading", "body", "table_cell", "header", "footer", "stamp", "signature", "other"]
+                      }
+                    }
+                  }
+                },
+                "tables": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["table_id", "bbox", "rows", "conf"],
+                    "properties": {
+                      "table_id": { "type": "string" },
+                      "bbox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                      "header_row_idx": { "type": "integer", "minimum": 0 },
+                      "rows": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "string" } }
+                      },
+                      "conf": { "type": "number", "minimum": 0, "maximum": 1 }
+                    }
+                  }
+                },
+                "images": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["img_id", "bbox", "kind"],
+                    "properties": {
+                      "img_id": { "type": "string" },
+                      "bbox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                      "kind": { "type": "string", "enum": ["stamp", "signature", "logo", "photo", "other"] },
+                      "ocr_text": { "type": "string" },
+                      "conf": { "type": "number", "minimum": 0, "maximum": 1 }
+                    }
+                  }
+                },
+                "full_text": { "type": "string", "description": "Concatenated text in reading order for this page" }
+              }
+            }
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "ocr_engine": { "type": "string" },
+              "engine_version": { "type": "string" },
+              "lang": { "type": "string" },
+              "runtime_ms": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

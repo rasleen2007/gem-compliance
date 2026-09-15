@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "api_envelope.schema.json",
+  "title": "ApiEnvelope",
+  "description": "Standard REST response envelope wrapping every payload from backend/app.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "request_id", "data", "error"],
+  "properties": {
+    "status": { "type": "string", "enum": ["ok", "error", "accepted"] },
+    "request_id": { "type": "string", "format": "uuid" },
+    "data": {
+      "description": "Any contract payload (document_upload, ocr_extraction, validation_result, compliance_dashboard, ...)"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "example": "INVALID_DOC_ROLE" },
+        "message": { "type": "string" },
+        "details": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

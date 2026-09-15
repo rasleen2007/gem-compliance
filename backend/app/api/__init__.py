@@ -1,0 +1,1 @@
+"""API namespace: routers live in app.api.routes, orchestration in app.services."""

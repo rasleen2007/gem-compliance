@@ -1,0 +1,59 @@
+{
+  "tender_id": "GeM/2026/B/123456",
+  "bid_id": "bid-2026-001",
+  "supplier": "Acme Industries Pvt Ltd",
+  "category": "Petroleum Products",
+  "status": "DISCREPANT",
+  "score": { "pass": 6, "fail": 2, "warn": 1, "skip": 0, "error": 0, "total": 9, "compliance_pct": 66.7 },
+  "category_breakdown": [
+    { "category": "EMD", "pass": 1, "fail": 1, "warn": 0, "total": 2 },
+    { "category": "Eligibility", "pass": 1, "fail": 0, "warn": 0, "total": 1 },
+    { "category": "Technical", "pass": 1, "fail": 0, "warn": 1, "total": 2 },
+    { "category": "Financial", "pass": 1, "fail": 1, "warn": 0, "total": 2 },
+    { "category": "Certificates", "pass": 2, "fail": 0, "warn": 0, "total": 2 }
+  ],
+  "documents": [
+    { "file_id": "f1", "file_name": "Technical_Bid.pdf", "doc_role": "technical_bid", "stage": "validated", "status": "ok" },
+    { "file_id": "f2", "file_name": "Financial_Bid.pdf", "doc_role": "financial_bid", "stage": "validated", "status": "ok" },
+    { "file_id": "f3", "file_name": "EMD.pdf", "doc_role": "emd", "stage": "validated", "status": "partial" }
+  ],
+  "issues": [
+    {
+      "rule_id": "RULE-EMD-001",
+      "category": "EMD",
+      "severity": "blocking",
+      "status": "fail",
+      "summary": "EMD percentage (0.5%) below required 2%",
+      "evidence": "As per clause 5.2, EMD of 0.5% of quoted value furnished via BG.",
+      "source_span": { "page": 2, "start": 40, "end": 96, "bbox": [120, 452, 980, 470] },
+      "suggested_action": "attach_missing_doc"
+    },
+    {
+      "rule_id": "RULE-FIN-001",
+      "category": "Financial",
+      "severity": "blocking",
+      "status": "fail",
+      "summary": "Itemised price breakup table not detected",
+      "evidence": "Only summary price sheet found (2 columns, no unit rates).",
+      "source_span": { "page": 5 },
+      "suggested_action": "attach_missing_doc"
+    },
+    {
+      "rule_id": "RULE-TECH-001",
+      "category": "Technical",
+      "severity": "mandatory",
+      "status": "warn",
+      "summary": "Delivery period not clearly stated (low OCR confidence)",
+      "evidence": "delivery within 6-8 weeks",
+      "conf": 0.62,
+      "suggested_action": "manual_review"
+    }
+  ],
+  "timeline": [
+    { "stage": "upload", "status": "done", "ts": "2026-09-16T09:00:01Z", "runtime_ms": 380, "message": "3 files accepted" },
+    { "stage": "ocr", "status": "done", "ts": "2026-09-16T09:00:18Z", "runtime_ms": 16040, "message": "EMD.pdf partial (stamp unreadable)" },
+    { "stage": "nlp", "status": "done", "ts": "2026-09-16T09:00:20Z", "runtime_ms": 1100, "message": "9 sections, 14 entities" },
+    { "stage": "validation", "status": "done", "ts": "2026-09-16T09:00:20Z", "runtime_ms": 410, "message": "9/9 rules evaluated" }
+  ],
+  "adjudication": null
+}

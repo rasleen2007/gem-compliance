@@ -1,0 +1,1 @@
+"""OCR & layout parsing package (Stage 1 of pipeline). Emits contract 2 (ocr_extraction)."""
