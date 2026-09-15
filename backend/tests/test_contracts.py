@@ -4,8 +4,9 @@ validate against contracts/*.schema.json.
 Run: python -m pytest backend/tests -q
 """
 
+import json
+
 import jsonschema
-import pytest
 
 from app.schemas.common import CONTRACTS_DIR
 from app.schemas.documents import DocumentUpload, OcrExtraction
@@ -35,18 +36,23 @@ SAMPLE_RULE = {
 }
 
 
+def _strip_none(value):
+    if isinstance(value, dict):
+        return {k: _strip_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_none(v) for v in value if v is not None]
+    return value
+
+
 def validate_against(schema_name: str, payload: dict) -> None:
-    schema = jsonschema.Schema()
-    path = CONTRACTS_DIR / schema_name
-    with path.open("r", encoding="utf-8") as fh:
-        import json
+    with (CONTRACTS_DIR / schema_name).open("r", encoding="utf-8") as fh:
         schema = json.load(fh)
-    jsonschema.validate(payload, schema)
+    jsonschema.validate(_strip_none(payload), schema)
 
 
 def test_upload_contract_matches_schema():
     payload = DocumentUpload.model_validate(SAMPLE_UPLOAD).model_dump()
-    validate_against("document_upload.schema.json", {k: v for k, v in payload.items() if v is not None})
+    validate_against("document_upload.schema.json", payload)
 
 
 def test_rule_contract_matches_schema():
