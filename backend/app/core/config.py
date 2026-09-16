@@ -30,6 +30,10 @@ class Settings:
     demo_tender_id: str = os.getenv("DEMO_TENDER_ID", "GeM/2026/B/123456")
     emd_threshold: str = os.getenv("EMD_THRESHOLD", "50000")
     cors_origins: list[str] = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    cors_origin_regex: str = os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"https://.*\.vercel\.app",
+    )
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 

@@ -4,7 +4,9 @@
 
 import axios from 'axios'
 
-const client = axios.create({ baseURL: '/api/v1' })
+const client = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+})
 
 // --- upload / validation ------------------------------------------------
 export const uploadBid = (formData) => client.post('/upload', formData)
