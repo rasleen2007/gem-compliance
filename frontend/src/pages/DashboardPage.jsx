@@ -45,38 +45,42 @@ export default function DashboardPage({ bidId, onDone }) {
 
   if (error) {
     return (
-      <section>
-        <h2>Compliance Dashboard</h2>
-        <p role="alert">Failed to load dashboard: {error}</p>
+      <div className="app-page">
+        <header className="page-heading">
+          <h1>Compliance Dashboard</h1>
+          <p role="alert">Failed to load dashboard: {error}</p>
+        </header>
         <StatusBadge status="error" />
-      </section>
+      </div>
     )
   }
 
   if (!envelope) {
     return (
-      <section>
-        <h2>Compliance Dashboard</h2>
-        <p aria-live="polite">Pipeline in progress — polling…</p>
+      <div className="app-page">
+        <header className="page-heading">
+          <h1>Compliance Dashboard</h1>
+          <p aria-live="polite">Pipeline in progress — polling…</p>
+        </header>
         <StatusBadge status="IN_PROGRESS" />
-      </section>
+      </div>
     )
   }
 
   const { score = {}, issues = [], documents = [], category_breakdown: breakdown = [] } = envelope
 
   return (
-    <section>
-      <header>
-        <h2>Compliance Dashboard</h2>
-        <span>
+    <div className="app-page">
+      <header className="page-heading">
+        <span className="page-sub">
           {envelope.tender_id} / {envelope.bid_id} — {envelope.supplier}
         </span>
-        <StatusBadge status={envelope.status} />
+        <h1 style={{ marginTop: 2 }}>Compliance Dashboard</h1>
+        <p className="page-sub" style={{ marginTop: 8 }}>Verification result: <StatusBadge status={envelope.status} /></p>
       </header>
 
       {/* --- top metrics row ------------------------------------------------- */}
-      <div className="metric-row" style={{ display: 'flex', gap: 16 }}>
+      <div className="metric-row">
         <div className="metric">
           <span className="metric-label">Overall Status</span>
           <strong>{envelope.status}</strong>
@@ -99,6 +103,7 @@ export default function DashboardPage({ bidId, onDone }) {
       <PipelineTimeline envelope={envelope} />
 
       {/* --- category breakdown --------------------------------------------- */}
+      <section className="dash-section">
       <h3>Category Breakdown</h3>
       {breakdown.length === 0 ? (
         <p>No rules evaluated yet.</p>
@@ -123,31 +128,39 @@ export default function DashboardPage({ bidId, onDone }) {
           </tbody>
         </table>
       )}
+      </section>
 
       {/* --- document states ------------------------------------------------- */}
+      <section className="dash-section">
       <h3>Documents</h3>
       {documents.length === 0 ? (
         <p>No documents tracked.</p>
       ) : (
-        <ul>
+        <ul className="file-list">
           {documents.map((doc) => (
-            <li key={doc.file_id}>
-              <span>{doc.file_name || doc.file_id}</span> —{' '}
-              <StatusBadge status={doc.stage} /> <StatusBadge status={doc.status} />
+            <li className="file-row" key={doc.file_id}>
+              <span className="file-meta">
+                <strong>{doc.file_name || doc.file_id}</strong>
+                <small>{doc.doc_role || 'document'}</small>
+              </span>
+              <StatusBadge status={doc.status} />
             </li>
           ))}
         </ul>
       )}
+      </section>
 
       {/* --- issues table (evidence drill-down) ------------------------------ */}
+      <section className="dash-section">
       <h3>Compliance Issues</h3>
       {issues.length === 0 ? (
         <p>No compliance issues found — all rules passed.</p>
       ) : (
-        <div>
+        <div className="stack-issues">
           {issues.map((issue) => <IssueCard key={issue.rule_id} issue={issue} />)}
         </div>
       )}
-    </section>
+      </section>
+    </div>
   )
 }

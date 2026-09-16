@@ -1,6 +1,6 @@
 // PipelineTimeline — visual stage tracker for contract 6.
 // Renders the documented pipeline stages (upload -> OCR -> LAYOUT -> NLP ->
-// VALIDATION) in order, with a color band per stage state and the
+// VALIDATION) in order, with a flat color-coded band per stage state and the
 // runtime/status/message from the matching pipeline event. Stages without a
 // recorded event are shown as `pending` until one arrives.
 
@@ -28,10 +28,6 @@ const EVENT_TO_STAGE = {
   adjudication: 'validation',
 }
 
-const STAGE_BAND = {
-  done: '#22c55e', running: '#3b82f6', error: '#ef4444', pending: '#9ca3af',
-}
-
 function normalizeEvent(event) {
   return {
     status: event?.status ?? 'pending',
@@ -57,26 +53,23 @@ export default function PipelineTimeline({ envelope }) {
 
   return (
     <div className="pipeline-timeline" aria-label="Pipeline stage timeline">
-      <ol style={{ display: 'flex', gap: 4, alignItems: 'stretch', listStyle: 'none', padding: 0, margin: 0 }}>
-        {timeline.map((stage, i) => {
-          const color = STAGE_BAND[stage.status] || STAGE_BAND.pending
-          return (
-            <li key={stage.key} style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ padding: 8, borderRadius: 8, border: `2px solid ${color}`, background: `${color}22` }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 4 }}>
-                  <span>{stage.label}</span>
-                  <StatusBadge status={stage.status} />
-                </div>
-                {stage.runtime_ms != null && (
-                  <div style={{ fontSize: 11, opacity: 0.75 }}>{stage.runtime_ms} ms</div>
-                )}
-                {stage.message && <div style={{ fontSize: 11, opacity: 0.75 }}>{stage.message}</div>}
+      <ol>
+        {timeline.map((stage) => (
+          <li key={stage.key}>
+            <div className={`pt-card pt-${stage.status}`}>
+              <div className="pt-head">
+                <span className="pt-label">{stage.label}</span>
+                <StatusBadge status={stage.status} />
               </div>
-            </li>
-          )
-        })}
+              {stage.runtime_ms != null && (
+                <div className="pt-meta">{stage.runtime_ms} ms</div>
+              )}
+              {stage.message && <div className="pt-meta">{stage.message}</div>}
+            </div>
+          </li>
+        ))}
       </ol>
-      <p style={{ minHeight: 18, margin: '8px 0 0' }} aria-live="polite">
+      <p className="pt-status-line" aria-live="polite">
         {running ? `${running.label} in progress…` : 'All tracked stages complete.'}
       </p>
     </div>

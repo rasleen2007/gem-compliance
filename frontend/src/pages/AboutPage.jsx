@@ -71,10 +71,6 @@ const BENEFITS = [
   },
 ]
 
-function accentClass(name) {
-  return { blue: 'about-accent-blue', emerald: 'about-accent-emerald', amber: 'about-accent-amber' }[name] || ''
-}
-
 function PillarCard({ p }) {
   return (
     <article className={`about-pillar about-${p.accent}`}>

@@ -1,19 +1,24 @@
-// Light-mode status pill — Uiverse-style high-contrast tag.
-// COMPLIANT: crisp emerald pill with a clean glowing outline text effect.
-// DISCREPANT: high-visibility crimson pill with a soft light-red aura.
-// See index.css for the .badge-* accent tones.
+// Light-mode status pill — flat corporate accent tag.
+// COMPLIANT: emerald text on a light-green strip with a sharp border.
+// DISCREPANT/FAILED: dark-crimson text on a clean light-red banner.
+// See index.css for the .badge-* accent tones (no glow, no neon).
 
 const TONES = {
   COMPLIANT: 'compliant',
   DISCREPANT: 'discrepant',
   NEEDS_REVIEW: 'review',
   IN_PROGRESS: 'progress',
+  RUNNING: 'progress',
   PASS: 'pass',
+  VALIDATED: 'pass',
+  OK: 'pass',
   FAIL: 'fail',
+  FAILED: 'error',
+  ERROR: 'error',
   WARN: 'warn',
   SKIP: 'skip',
-  ERROR: 'error',
-  FAILED: 'error',
+  PARSED: 'progress',
+  DONE: 'pass',
 }
 
 export default function StatusBadge({ status }) {

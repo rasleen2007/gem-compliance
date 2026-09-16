@@ -6,16 +6,16 @@ import RulesManagementPage from './pages/RulesManagementPage.jsx'
 import AboutPage from './pages/AboutPage.jsx'
 
 const NAV_ITEMS = [
+  { key: 'about', label: 'System Specs', icon: '◈' },
   { key: 'upload', label: 'Verify New Bid', icon: '⇪' },
   { key: 'rules', label: 'Rules Matrix', icon: '☷' },
-  { key: 'about', label: 'System Specs', icon: '◈' },
 ]
 
-// App shell: state-driven SPA routing (upload -> dashboard -> results),
-// plus the persistent master header so judges can jump to the admin views
-// (Rules Matrix / System Specs) at any point during the pitch.
+// App shell: state-driven SPA routing (about landing -> upload -> dashboard ->
+// results) plus the persistent master header so judges can jump between the
+// admin views. The app boots directly onto the About (landing) view.
 export default function App() {
-  const [route, setRoute] = React.useState('upload')
+  const [route, setRoute] = React.useState('about')
   const [bidId, setBidId] = React.useState('')
 
   const navigate = (next) => {
@@ -31,9 +31,7 @@ export default function App() {
     page = <ResultsPage bidId={bidId} onReset={() => setRoute('upload')} />
   } else if (route === 'rules') {
     page = <RulesManagementPage />
-  } else if (route === 'about') {
-    page = <AboutPage />
-  } else {
+  } else if (route === 'upload') {
     page = (
       <UploadPage
         onSubmitted={(id) => {
@@ -42,13 +40,15 @@ export default function App() {
         }}
       />
     )
+  } else {
+    page = <AboutPage />
   }
 
   return (
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-inner">
-          <button type="button" className="app-brand" onClick={() => navigate('upload')}>
+          <button type="button" className="app-brand" onClick={() => navigate('about')}>
             <span className="app-brand-mark">◆</span>
             <span className="app-brand-text">
               <strong>GeM Bid Compliance</strong>
