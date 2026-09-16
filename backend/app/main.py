@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import db
 from app.core.config import settings
-from app.api.routes import dashboard, jobs, upload, validation
+from app.api.routes import dashboard, jobs, rules, upload, validation
 
 
 @asynccontextmanager
@@ -30,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for router in (upload.router, validation.router, dashboard.router, jobs.router):
+for router in (upload.router, validation.router, dashboard.router, jobs.router, rules.router):
     app.include_router(router, prefix=settings.api_v1_prefix)
 
 

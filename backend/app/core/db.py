@@ -166,6 +166,33 @@ def fetch_rules(tender_id: str) -> list[dict]:
         conn.close()
 
 
+def list_rules(tender_id: str | None = None) -> list[dict]:
+    """Every rule (enabled or not) for the reference tender, for the admin matrix."""
+    conn = _connect()
+    try:
+        if tender_id:
+            rows = conn.execute(
+                """SELECT rule_id, tender_id, category, description, severity, element,
+                          target, operator, expected_value, expression, notes, enabled
+                   FROM validation_rules
+                   WHERE tender_id = ?
+                   ORDER BY CASE severity WHEN 'blocking' THEN 0
+                            WHEN 'mandatory' THEN 1 ELSE 2 END, rule_id""",
+                (tender_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT rule_id, tender_id, category, description, severity, element,
+                          target, operator, expected_value, expression, notes, enabled
+                   FROM validation_rules
+                   ORDER BY CASE severity WHEN 'blocking' THEN 0
+                            WHEN 'mandatory' THEN 1 ELSE 2 END, rule_id""",
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Dashboard reads (contract 6)
 # ---------------------------------------------------------------------------

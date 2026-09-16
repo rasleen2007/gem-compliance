@@ -10,6 +10,10 @@ const client = axios.create({ baseURL: '/api/v1' })
 export const uploadBid = (formData) => client.post('/upload', formData)
 export const runValidation = (requestId) => client.post(`/validate/${requestId}`)
 
+// --- rules admin --------------------------------------------------------
+export const getRules = (tenderId) =>
+  client.get('/rules', { params: tenderId ? { tender_id: tenderId } : undefined })
+
 // --- polling (jobs + dashboard) ----------------------------------------
 export const getJob = (requestId) => client.get(`/jobs/${requestId}`)
 export const getDashboard = (bidId) => client.get(`/dashboard/${bidId}`)

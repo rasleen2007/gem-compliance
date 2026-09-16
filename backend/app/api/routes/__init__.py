@@ -1,1 +1,1 @@
-"""HTTP routers: upload, validation, dashboard, jobs."""
+"""HTTP routers: upload, validation, dashboard, jobs, rules."""
