@@ -1,7 +1,8 @@
 """SQLite persistence layer (Phase P0).
 
 Bootstrap: creates `data/sih_local.db` from database_schema/schema.sql on first
-use (idempotent), then seeds the demo EMD rule (contract 4) if absent.
+use (idempotent), seeds the demo rule pack (contract 4) if absent, and injects
+three dashboard-ready demo bids (pass / fail / conflict) for live pitches.
 
 All access goes through these helpers; the backend never talks to SQL directly
 elsewhere. Contract rule rows are returned as dicts matching
@@ -10,6 +11,7 @@ elsewhere. Contract rule rows are returned as dicts matching
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app import REPO_ROOT
@@ -28,12 +30,13 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create tables + seed demo rules. Safe to call repeatedly."""
+    """Create tables + seed demo rules + demo bids. Safe to call repeatedly."""
     conn = _connect()
     try:
         schema = SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema)
         _seed_demo_rules(conn)
+        _seed_demo_bids(conn)
         conn.commit()
     finally:
         conn.close()
@@ -91,6 +94,35 @@ def insert_pipeline_event(request_id: str, bid_id: str, stage: str, status: str,
             "INSERT INTO pipeline_events (request_id, bid_id, stage, status, ts, runtime_ms, message)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (request_id, bid_id, stage, status, ts, runtime_ms, message),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_document_stage(file_id: str, stage: str, stage_status: str = "ok") -> None:
+    """Record a per-file pipeline outcome (e.g. a corrupt doc -> stage='failed')."""
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE documents SET stage = ?, stage_status = ? WHERE file_id = ?",
+            (stage, stage_status, file_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def insert_adjudication(bid_id: str, decision: str, officer: str = "",
+                        comment: str = "", ts: str | None = None) -> None:
+    """Record a reviewer decision for a bid (upsert: one adjudication per bid)."""
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO adjudications (bid_id, decision, officer, comment, ts)
+               VALUES (?, ?, ?, ?, ?)""",
+            (bid_id, decision, officer, comment,
+             ts or datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         conn.commit()
     finally:
@@ -270,3 +302,271 @@ def _seed_demo_rules(conn: sqlite3.Connection) -> None:
              element, target, operator, expected,
              f"Phase P1 demo rule — {operator} against {target}"),
         )
+
+
+# --------------------------------------------------------------------------
+# Demo bids (Phase P4) — dashboard-ready history for live presentations
+# --------------------------------------------------------------------------
+_DEMO_TENDER = "GeM/2026/B/123456"
+
+
+def _r(rule_id: str, status: str, reason: str, confidence: float,
+       action: str = "none", evidence: dict | None = None) -> dict:
+    return {
+        "rule_id": rule_id, "status": status, "reason": reason,
+        "confidence": confidence, "suggested_action": action,
+        "evidence": evidence if evidence is not None else {"found": reason},
+    }
+
+
+def _ev(stage: str, status: str, ts: str, message: str, runtime_ms: int = 0) -> dict:
+    return {"stage": stage, "status": status, "ts": ts,
+            "message": message, "runtime_ms": runtime_ms}
+
+
+def _doc(file_id: str, file_name: str, file_type: str, doc_role: str, size_bytes: int,
+         sha256: str, store_path: str, stage: str = "validated", stage_status: str = "ok") -> dict:
+    return {
+        "file_id": file_id, "file_name": file_name, "file_type": file_type,
+        "doc_role": doc_role, "size_bytes": size_bytes, "sha256": sha256,
+        "store_path": store_path, "stage": stage, "stage_status": stage_status,
+    }
+
+
+def _seed_bid_record(conn: sqlite3.Connection, *, bid_id: str, request_id: str,
+                     supplier: str, category: str, overall_status: str,
+                     documents: list[dict], rule_results: list[dict],
+                     events: list[dict], adjudication: dict | None = None) -> None:
+    """Insert one fully-populated demo bid so /dashboard renders end-to-end."""
+    conn.execute(
+        """INSERT OR IGNORE INTO bids
+           (bid_id, tender_id, supplier, category, request_id, overall_status)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (bid_id, _DEMO_TENDER, supplier, category, request_id, overall_status),
+    )
+    for doc in documents:
+        conn.execute(
+            """INSERT OR IGNORE INTO documents
+               (file_id, bid_id, file_name, file_type, doc_role, size_bytes, sha256, store_path, stage, stage_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (doc["file_id"], bid_id, doc["file_name"], doc["file_type"], doc["doc_role"],
+             doc["size_bytes"], doc["sha256"], doc["store_path"], doc["stage"], doc["stage_status"]),
+        )
+    conn.execute("DELETE FROM rule_results WHERE bid_id = ?", (bid_id,))
+    for r in rule_results:
+        conn.execute(
+            "INSERT INTO rule_results (bid_id, rule_id, status, evidence, reason, confidence, suggested_action)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (bid_id, r["rule_id"], r["status"], json.dumps(r.get("evidence") or {}),
+             r["reason"], r["confidence"], r.get("suggested_action", "none")),
+        )
+    for ev in events:
+        conn.execute(
+            "INSERT INTO pipeline_events (request_id, bid_id, stage, status, ts, runtime_ms, message)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (request_id, bid_id, ev["stage"], ev["status"], ev["ts"],
+             ev.get("runtime_ms", 0), ev.get("message", "")),
+        )
+    if adjudication:
+        conn.execute(
+            """INSERT OR REPLACE INTO adjudications (bid_id, decision, officer, comment, ts)
+               VALUES (?, ?, ?, ?, ?)""",
+            (bid_id, adjudication["decision"], adjudication["officer"],
+             adjudication["comment"], adjudication["ts"]),
+        )
+
+
+def _seed_demo_bids(conn: sqlite3.Connection) -> None:
+    """Seed three kitchen-sink demo bids ONLY if none exist yet. Idempotent.
+
+    demo-pass-001    -> every rule passes   -> COMPLIANT
+    demo-fail-001    -> missing docs + weak financials, one corrupt file -> DISCREPANT
+    demo-conflict-001-> XCHK identity conflict (COMPANY_NAME/INCORPORATION_DATE) -> DISCREPANT
+    """
+    if conn.execute("SELECT COUNT(*) AS c FROM bids WHERE bid_id LIKE 'demo-%'").fetchone()["c"]:
+        return
+
+    # -- PASS: Bharat Infrastructure Ltd ---------------------------------------
+    pass_results = [
+        _r("RULE-EMD-001", "pass", "Extracted 75000.0 >= required 50000.0", 0.95,
+           evidence={"found": "EMD of Rs. 75,000 furnished via Bank Guarantee"}),
+        _r("RULE-DOC-001", "pass", "GSTIN present in parsed document", 0.9,
+           evidence={"found": "27AABCA1234F1Z5"}),
+        _r("RULE-DOC-002", "pass", "PAN present in parsed document", 0.9,
+           evidence={"found": "AABCA1234D"}),
+        _r("RULE-DOC-003", "pass", "table:PRICE_BREAKUP present in parsed document", 0.9,
+           evidence={"found": "Itemized price breakup table detected"}),
+        _r("RULE-DATE-001", "pass", "CERT_VALIDITY 2027-12-31 is after 2026-06-30", 0.9,
+           evidence={"found": "valid till 2027-12-31"}),
+        _r("RULE-DATE-002", "pass", "INCORPORATION_DATE 2015-03-20 is before 2020-01-01", 0.9,
+           evidence={"found": "Date of Incorporation: 2015-03-20"}),
+        _r("RULE-FIN-001", "pass", "Extracted 2.5e+07 >= required 1e+07", 0.95,
+           evidence={"found": "Financial Year 2025-26 turnover of Rs. 2.50 crore"}),
+        _r("RULE-XCHK-001", "pass", "COMPANY_NAME consistent across 4 document(s)", 0.9),
+        _r("RULE-XCHK-002", "pass", "PAN consistent across 4 document(s)", 0.9),
+        _r("RULE-XCHK-003", "pass", "GSTIN consistent across 4 document(s)", 0.9),
+        _r("RULE-XCHK-004", "pass", "CIN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-005", "pass", "COMPANY_REGISTRATION_NUMBER consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-006", "pass", "INCORPORATION_DATE consistent across 4 document(s)", 0.9),
+    ]
+    _seed_bid_record(
+        conn, bid_id="demo-pass-001", request_id="req-demo-pass-001",
+        supplier="Bharat Infrastructure Ltd", category="Civil Works",
+        overall_status="COMPLIANT",
+        documents=[
+            _doc("demo-file-pass-tech", "technical_bid_bharat.pdf", "pdf", "technical_bid", 482132,
+                 "9f9f9f9f" * 8, "demo/pass/technical_bid_bharat.pdf"),
+            _doc("demo-file-pass-fin", "financial_bid_bharat.pdf", "pdf", "financial_bid", 315840,
+                 "8e8e8e8e" * 8, "demo/pass/financial_bid_bharat.pdf"),
+            _doc("demo-file-pass-cert", "certificate_bharat.pdf", "pdf", "certificates", 1029440,
+                 "7d7d7d7d" * 8, "demo/pass/certificate_bharat.pdf"),
+            _doc("demo-file-pass-emd", "emd_receipt_bharat.pdf", "pdf", "emd", 88240,
+                 "6c6c6c6c" * 8, "demo/pass/emd_receipt_bharat.pdf"),
+        ],
+        rule_results=pass_results,
+        events=[
+            _ev("upload", "done", "2026-09-10T09:30:00+00:00", "4 file(s) accepted"),
+            _ev("ocr", "running", "2026-09-10T09:30:00+00:00", "Extracting text and layout regions"),
+            _ev("ocr", "done", "2026-09-10T09:30:04+00:00", "14 page(s), 98 block(s), 6 table(s), 2 region(s)", 4210),
+            _ev("nlp", "running", "2026-09-10T09:30:04+00:00", "Structuring sections and extracting entities"),
+            _ev("nlp", "done", "2026-09-10T09:30:06+00:00", "4 doc(s), 19 section(s), 47 entit(ies)", 1820),
+            _ev("validation", "running", "2026-09-10T09:30:06+00:00", "Evaluating compliance rules"),
+            _ev("validation", "done", "2026-09-10T09:30:06+00:00", "13 rule(s) evaluated -> COMPLIANT", 130),
+        ],
+    )
+
+    # -- FAIL: missing identities + weak financials + one corrupt file --------
+    fail_evidence = {"found": None, "conflict": False}
+    fail_results = [
+        _r("RULE-EMD-001", "fail", "Extracted 10000.0 < required 50000.0", 0.9, "attach_missing_doc",
+           evidence={"found": "EMD of Rs. 10,000 furnished (below threshold)"}),
+        _r("RULE-DOC-001", "fail", "GSTIN: [] not found in parsed document", 0.9, "attach_missing_doc",
+           evidence={"found": None, "missing": ["GSTIN"]}),
+        _r("RULE-DOC-002", "fail", "PAN: [] not found in parsed document", 0.9, "attach_missing_doc",
+           evidence={"found": None, "missing": ["PAN"]}),
+        _r("RULE-DOC-003", "fail", "table:PRICE_BREAKUP present in parsed document", 0.9, "attach_missing_doc",
+           evidence={"found": None, "missing": ["table:PRICE_BREAKUP"]}),
+        _r("RULE-DATE-001", "skip", "No comparable date available", 0.5, "manual_review"),
+        _r("RULE-DATE-002", "skip", "No comparable date available", 0.5, "manual_review"),
+        _r("RULE-FIN-001", "fail", "Extracted 2.5e+06 < required 1e+07", 0.9, "attach_missing_doc",
+           evidence={"found": "Financial Year 2025-26 turnover of Rs. 25 lakh (below 1 crore)"}),
+        _r("RULE-XCHK-001", "pass", "COMPANY_NAME consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-002", "pass", "PAN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-003", "pass", "GSTIN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-004", "pass", "CIN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-005", "pass", "COMPANY_REGISTRATION_NUMBER consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-006", "pass", "INCORPORATION_DATE consistent across 2 document(s)", 0.9),
+    ]
+    _seed_bid_record(
+        conn, bid_id="demo-fail-001", request_id="req-demo-fail-001",
+        supplier="Global Parts Exports", category="Industrial Supplies",
+        overall_status="DISCREPANT",
+        documents=[
+            _doc("demo-file-fail-tech", "technical_bid_global.pdf", "pdf", "technical_bid", 391044,
+                 "5b5b5b5b" * 8, "demo/fail/technical_bid_global.pdf"),
+            _doc("demo-file-fail-fin", "financial_bid_global.pdf", "pdf", "financial_bid", 262180,
+                 "4a4a4a4a" * 8, "demo/fail/financial_bid_global.pdf"),
+            _doc("demo-file-fail-cert", "certificate_global.pdf", "pdf", "certificates", 0,
+                 "39393939" * 8, "demo/fail/certificate_global.pdf",
+                 stage="failed", stage_status="error"),
+        ],
+        rule_results=fail_results,
+        events=[
+            _ev("upload", "done", "2026-09-11T11:45:00+00:00", "3 file(s) accepted"),
+            _ev("ocr", "running", "2026-09-11T11:45:00+00:00", "Extracting text and layout regions"),
+            _ev("ocr", "error", "2026-09-11T11:45:02+00:00",
+                "File demo-file-fail-cert failed (fitz.FileDataError: cannot open broken document)"),
+            _ev("ocr", "done", "2026-09-11T11:45:03+00:00",
+                "6 page(s), 41 block(s), 1 table(s), 0 region(s) - 1 corrupt file(s) isolated; remaining 2 doc(s) validated", 3150),
+            _ev("nlp", "running", "2026-09-11T11:45:03+00:00", "Structuring sections and extracting entities"),
+            _ev("nlp", "done", "2026-09-11T11:45:05+00:00", "2 doc(s), 11 section(s), 26 entit(ies)", 1420),
+            _ev("validation", "running", "2026-09-11T11:45:05+00:00", "Evaluating compliance rules"),
+            _ev("validation", "done", "2026-09-11T11:45:05+00:00", "13 rule(s) evaluated -> DISCREPANT", 120),
+        ],
+    )
+
+    # -- CONFLICT: XCHK identity mismatch streaks across docs ------------------
+    conflict_name = {
+        "found": "COMPANY_NAME disagrees across 2 document(s): SRI GANESH ELECTRICALS PVT LTD, "
+                 "SRI GANESH ELECTRONICS PVT LTD",
+        "source_span": None, "file_id": None, "table_id": None,
+        "distinct_values": ["SRI GANESH ELECTRICALS PVT LTD", "SRI GANESH ELECTRONICS PVT LTD"],
+        "conflict_records": [
+            {"field": "COMPANY_NAME", "status": "conflict", "file_id": "demo-file-conflict-fin",
+             "doc_role": "financial_bid", "value": "Sri Ganesh Electricals Pvt Ltd",
+             "normalized_value": "SRI GANESH ELECTRICALS PVT LTD", "confidence": 0.86,
+             "source_span": {"page": 1, "start": 18, "end": 47}},
+            {"field": "COMPANY_NAME", "status": "conflict", "file_id": "demo-file-conflict-cert",
+             "doc_role": "certificates", "value": "Sri Ganesh Electronics Pvt Ltd",
+             "normalized_value": "SRI GANESH ELECTRONICS PVT LTD", "confidence": 0.86,
+             "source_span": {"page": 1, "start": 24, "end": 55}},
+        ],
+        "cross_check_conflict": True,
+    }
+    conflict_date = {
+        "found": "INCORPORATION_DATE disagrees across 2 document(s): 2016-04-01, 2018-11-25",
+        "source_span": None, "file_id": None, "table_id": None,
+        "distinct_values": ["2016-04-01", "2018-11-25"],
+        "conflict_records": [
+            {"field": "INCORPORATION_DATE", "status": "conflict", "file_id": "demo-file-conflict-fin",
+             "doc_role": "financial_bid", "value": "2016-04-01", "normalized_value": "2016-04-01",
+             "confidence": 0.9, "source_span": {"page": 1, "start": 90, "end": 100}},
+            {"field": "INCORPORATION_DATE", "status": "conflict", "file_id": "demo-file-conflict-cert",
+             "doc_role": "certificates", "value": "2018-11-25", "normalized_value": "2018-11-25",
+             "confidence": 0.94, "source_span": {"page": 1, "start": 33, "end": 43}},
+        ],
+        "cross_check_conflict": True,
+    }
+    conflict_results = [
+        _r("RULE-EMD-001", "pass", "Extracted 60000.0 >= required 50000.0", 0.95,
+           evidence={"found": "EMD of Rs. 60,000 furnished via Bank Guarantee"}),
+        _r("RULE-DOC-001", "pass", "GSTIN present in parsed document", 0.9,
+           evidence={"found": "33AACCS1234F1Z8"}),
+        _r("RULE-DOC-002", "pass", "PAN present in parsed document", 0.9,
+           evidence={"found": "AACCS1234K"}),
+        _r("RULE-DOC-003", "pass", "table:PRICE_BREAKUP present in parsed document", 0.9,
+           evidence={"found": "Itemized price breakup table detected"}),
+        _r("RULE-DATE-001", "pass", "CERT_VALIDITY 2028-06-30 is after 2026-06-30", 0.9,
+           evidence={"found": "valid till 2028-06-30"}),
+        _r("RULE-DATE-002", "pass", "INCORPORATION_DATE 2016-04-01 is before 2020-01-01", 0.9,
+           evidence={"found": "Date of Incorporation: 2016-04-01"}),
+        _r("RULE-FIN-001", "pass", "Extracted 1.8e+07 >= required 1e+07", 0.95,
+           evidence={"found": "Financial Year 2025-26 turnover of Rs. 1.80 crore"}),
+        _r("RULE-XCHK-001", "fail", "COMPANY_NAME disagrees across 2 document(s)", 0.86,
+           "manual_review", evidence=conflict_name),
+        _r("RULE-XCHK-002", "pass", "PAN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-003", "pass", "GSTIN consistent across 2 document(s)", 0.9),
+        _r("RULE-XCHK-004", "pass", "CIN consistent across 1 document(s)", 0.9),
+        _r("RULE-XCHK-005", "pass", "COMPANY_REGISTRATION_NUMBER consistent across 1 document(s)", 0.9),
+        _r("RULE-XCHK-006", "fail", "INCORPORATION_DATE disagrees across 2 document(s)", 0.9,
+           "manual_review", evidence=conflict_date),
+    ]
+    _seed_bid_record(
+        conn, bid_id="demo-conflict-001", request_id="req-demo-conflict-001",
+        supplier="Sri Ganesh Electricals", category="Electrical Goods",
+        overall_status="DISCREPANT",
+        documents=[
+            _doc("demo-file-conflict-fin", "financial_bid_ganesh.pdf", "pdf", "financial_bid", 298644,
+                 "2f2f2f2f" * 8, "demo/conflict/financial_bid_ganesh.pdf"),
+            _doc("demo-file-conflict-cert", "certificate_ganesh.pdf", "pdf", "certificates", 1145100,
+                 "10101010" * 8, "demo/conflict/certificate_ganesh.pdf"),
+        ],
+        rule_results=conflict_results,
+        events=[
+            _ev("upload", "done", "2026-09-12T15:20:00+00:00", "2 file(s) accepted"),
+            _ev("ocr", "running", "2026-09-12T15:20:00+00:00", "Extracting text and layout regions"),
+            _ev("ocr", "done", "2026-09-12T15:20:03+00:00", "9 page(s), 60 block(s), 2 table(s), 1 region(s)", 3120),
+            _ev("nlp", "running", "2026-09-12T15:20:03+00:00", "Structuring sections and extracting entities"),
+            _ev("nlp", "done", "2026-09-12T15:20:05+00:00", "2 doc(s), 10 section(s), 31 entit(ies)", 1540),
+            _ev("validation", "running", "2026-09-12T15:20:05+00:00", "Evaluating compliance rules"),
+            _ev("validation", "done", "2026-09-12T15:20:05+00:00",
+                "13 rule(s) evaluated -> DISCREPANT (cross-check conflict detected)", 140),
+        ],
+        adjudication={
+            "decision": "rework_requested",
+            "officer": "Review Desk",
+            "comment": "Company legal name on the Certificate of Incorporation does not match the "
+                       "financial sheet. Please re-submit consistent identity documents.",
+            "ts": "2026-09-13T10:05:00+00:00",
+        },
+    )

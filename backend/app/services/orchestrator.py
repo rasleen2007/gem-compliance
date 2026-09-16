@@ -118,8 +118,15 @@ def _record(job: PipelineJob, stage: str, status: str, runtime_ms: int = 0, mess
 # --------------------------------------------------------------------------
 # Stage helpers (also used by POST /validate re-runs)
 # --------------------------------------------------------------------------
-def build_parsed(job: PipelineJob, paths: dict[str, str]) -> dict:
-    """Stage 1+2: re-run extraction + layout + NLP for a job's stored documents."""
+def _extract_job_documents(job: PipelineJob, paths: dict[str, str]) -> dict:
+    """Stage 1+2, per-file resilient: a single corrupt/empty document must not
+    kill the whole pipeline.
+
+    OcrExtractor already isolates per-file failures into ``extraction["errors"]``
+    (degrading status to "partial"). Here we surface each failure as its own
+    `ocr` error pipeline_event, flip that document's DB row to stage='failed',
+    and keep going with the remaining valid files.
+    """
     docs = [StoredDocument(file_id=d["file_id"], doc_role=d["doc_role"], path=d["store_path"])
             for d in job.documents]
     extraction = OcrExtractor(engine=settings.ocr_engine, lang=settings.ocr_lang).extract(
@@ -127,6 +134,21 @@ def build_parsed(job: PipelineJob, paths: dict[str, str]) -> dict:
     extraction["tender_id"] = job.tender_id
     extraction["bid_id"] = job.bid_id
     LayoutParser().enrich(extraction, paths)
+
+    for err in extraction.get("errors", []):
+        file_id = err.get("file_id", "?")
+        message = err.get("message", "Unknown extraction error")
+        _record(job, "ocr", "error", 0, f"File {file_id} failed ({message})")
+        try:
+            db.update_document_stage(file_id, stage="failed", stage_status="error")
+        except Exception:  # noqa: BLE001 — doc-stage update never kills the pipeline
+            pass
+    return extraction
+
+
+def build_parsed(job: PipelineJob, paths: dict[str, str]) -> dict:
+    """Stage 1+2: re-run extraction + layout + NLP for a job's stored documents."""
+    extraction = _extract_job_documents(job, paths)
     return to_parsed_document(extraction, job.request_id, job.tender_id, job.bid_id)
 
 
@@ -158,29 +180,35 @@ def run_pipeline(job: PipelineJob) -> None:
         _record(job, "ocr", "running", 0, "Extracting text and layout regions")
 
         started = time.perf_counter()
-        docs = [StoredDocument(file_id=d["file_id"], doc_role=d["doc_role"], path=d["store_path"])
-                for d in job.documents]
-        extraction = OcrExtractor(engine=settings.ocr_engine, lang=settings.ocr_lang).extract(
-            docs, request_id=job.request_id)
-        extraction["tender_id"] = job.tender_id
-        extraction["bid_id"] = job.bid_id
-        LayoutParser().enrich(extraction, paths)
+        extraction = _extract_job_documents(job, paths)
         job.extraction = extraction
 
-        pages = sum(len(d.get("pages", [])) for d in extraction.get("documents", []))
+        valid_docs = extraction.get("documents", [])
+        failed_docs = extraction.get("errors", [])
+        if not valid_docs:
+            job.error = ("All uploaded files failed text extraction - no usable document remains. "
+                         "Re-upload valid PDF files.")
+            job.stage = Stage.FAILED
+            _record(job, "ocr", "error", int((time.perf_counter() - started) * 1000), job.error)
+            return
+
+        pages = sum(len(d.get("pages", [])) for d in valid_docs)
         blocks = sum(len(p.get("text_blocks", []))
-                     for d in extraction.get("documents", [])
+                     for d in valid_docs
                      for p in d.get("pages", []))
         tables = sum(len(p.get("tables", []))
-                     for d in extraction.get("documents", [])
+                     for d in valid_docs
                      for p in d.get("pages", []))
         regions = sum(len(p.get("images", []))
-                      for d in extraction.get("documents", [])
+                      for d in valid_docs
                       for p in d.get("pages", []))
         ocr_ms = int((time.perf_counter() - started) * 1000)
         job.stage = Stage.OCR_COMPLETE
-        _record(job, "ocr", "done", ocr_ms,
-                f"{pages} page(s), {blocks} block(s), {tables} table(s), {regions} region(s)")
+        ocr_summary = f"{pages} page(s), {blocks} block(s), {tables} table(s), {regions} region(s)"
+        if failed_docs:
+            ocr_summary += (f" - {len(failed_docs)} corrupt file(s) isolated; "
+                            f"remaining {len(valid_docs)} doc(s) validated")
+        _record(job, "ocr", "done", ocr_ms, ocr_summary)
 
         # --- Stage 2: NLP structuring --------------------------------------
         job.stage = Stage.NLP_RUNNING
@@ -214,6 +242,12 @@ def run_pipeline(job: PipelineJob) -> None:
         job.stage = Stage.VALIDATION_COMPLETE
         _record(job, "validation", "done", ms,
                 f"{n} rule(s) evaluated -> {job.result['overall_status']}")
+
+        for doc in extraction.get("documents", []):
+            try:
+                db.update_document_stage(doc.get("file_id"), stage="validated", stage_status="ok")
+            except Exception:  # noqa: BLE001 — doc-stage update never kills the pipeline
+                pass
     except Exception as exc:  # noqa: BLE001
         job.error = f"{type(exc).__name__}: {exc}"
         job.stage = Stage.FAILED

@@ -13,6 +13,7 @@ const TONES = {
   WARN: 'warn',
   SKIP: 'skip',
   ERROR: 'error',
+  FAILED: 'error',
 }
 
 export default function StatusBadge({ status }) {

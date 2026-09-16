@@ -36,7 +36,7 @@ def _clean_filename(filename: str | None) -> str:
 
 @router.post("/upload", response_model=ApiEnvelope, status_code=202)
 async def upload(
-    files: list[UploadFile] = File(..., alias="file"),
+    files: list[UploadFile] | None = File(default=None, alias="file"),
     tender_id: str = Form(...),
     bid_id: str = Form(...),
     supplier: str = Form(...),
@@ -62,6 +62,8 @@ async def upload(
             raise _error("INVALID_DOC_ROLE", f"doc_role must be one of: {', '.join(DOC_ROLES)}")
 
         content = await file.read()
+        if len(content) == 0:
+            raise _error("FILE_EMPTY", f"File '{filename}' is empty (0 bytes); upload a valid document")
         if len(content) > settings.max_upload_mb * 1024 * 1024:
             raise _error("FILE_TOO_LARGE", f"File exceeds {settings.max_upload_mb} MB limit", status=413)
 
