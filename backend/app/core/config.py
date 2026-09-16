@@ -29,7 +29,10 @@ class Settings:
     llm_model: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
     demo_tender_id: str = os.getenv("DEMO_TENDER_ID", "GeM/2026/B/123456")
     emd_threshold: str = os.getenv("EMD_THRESHOLD", "50000")
-    cors_origins: list[str] = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    cors_origins: list[str] = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,https://vercel.app,https://gem-compliance-six.vercel.app",
+    ).split(",")
     cors_origin_regex: str = os.getenv(
         "CORS_ORIGIN_REGEX",
         r"https://.*\.vercel\.app",
