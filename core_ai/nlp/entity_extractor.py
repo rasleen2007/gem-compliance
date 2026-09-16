@@ -32,6 +32,23 @@ CIN_RE = re.compile(r"\b[LUU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}\b")
 #: generic registration number near a labelling keyword
 REG_NO_RE = re.compile(r"(?i)\b(?:regn|regd|registration)\s*(?:no\.?|number)?\s*[:#.\- ]*([A-Z0-9]{4,22})")
 DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
+#: legal/business company name (identity field compared ACROSS documents)
+COMPANY_NAME_RE = re.compile(
+    r"(?:
+       (?:name\s+of\s+(?:the\s+)?(?:company|bidder|supplier|firm)
+        |company\s+name|name\s*[:.]\s*name))
+       \s*[:.\- ]*\s*
+       ([A-Z][A-Za-z0-9&' .,()\-]{3,79})
+     | m/s\s*[:.\- ]*\s*([A-Z][A-Za-z0-9&' .,()\-]{3,79})
+     | (?:incorporated\s+(?:as|under)|trading\s+as)\s*[:.\- ]*\s*
+       ([A-Z][A-Za-z0-9&' .,()\-]{3,79})",
+    re.IGNORECASE,
+)
+#: canonical identity fields reconciled across all uploaded files (cross-check)
+CROSS_CHECK_FIELDS = (
+    "GSTIN", "PAN", "CIN",
+    "COMPANY_REGISTRATION_NUMBER", "COMPANY_NAME", "INCORPORATION_DATE",
+)
 
 _VALIDITY_KEYWORDS = re.compile(r"\b(?:valid\s+till|valid\s+up\s+to|valid\s+through|validity|expires?\s+on|expiry)\b", re.IGNORECASE)
 _INCORP_KEYWORDS = re.compile(r"\b(?:date\s+of\s+incorporation|incorporated\s+on|incorporated\s+at)\b", re.IGNORECASE)
