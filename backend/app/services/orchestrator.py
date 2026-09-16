@@ -204,7 +204,7 @@ def run_pipeline(job: PipelineJob) -> None:
 
         started = time.perf_counter()
         job.result = evaluate(job)
-        job.result = ValidationResult.model_validate(job.result).model_dump()  # contract-5 gate
+        job.result = ValidationResult.model_validate(job.result).model_dump(by_alias=True)  # contract-5 gate
 
         db.insert_rule_results(job.bid_id, job.result.get("results", []))
         db.update_bid_status(job.bid_id, job.result["overall_status"])

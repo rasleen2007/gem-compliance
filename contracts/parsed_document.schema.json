@@ -11,6 +11,12 @@
     "tender_id": { "type": "string" },
     "bid_id": { "type": "string" },
     "status": { "type": "string", "enum": ["completed", "partial", "failed"] },
+    "has_cross_check_conflict": { "type": "boolean", "description": "True when at least one identity field disagrees across uploaded files" },
+    "cross_checks": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Multi-document identity conflict records from the cross-check pass"
+    },
     "documents": {
       "type": "array",
       "items": {

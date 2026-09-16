@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 
 SEVERITIES = ["blocking", "mandatory", "advisory"]
-OPERATORS = [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "date_before", "llm_judge"]
+OPERATORS = [">=", "<=", "==", "!=", ">", "<", "contains", "exists", "not_exists", "regex", "date_after", "date_before", "cross_check", "llm_judge"]
 RULE_STATUSES = ["pass", "fail", "warn", "skip", "error"]
 
 
@@ -29,6 +29,10 @@ class Evidence(BaseModel):
     source_span: dict | None = None
     file_id: str | None = None
     table_id: str | None = None
+    # Rule-XCHK: multi-document identity reconciliation
+    distinct_values: list[str] | None = None
+    conflict_records: list[dict] | None = None
+    cross_check_conflict: bool = False
 
 
 class RuleResult(BaseModel):

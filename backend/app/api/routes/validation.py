@@ -39,7 +39,7 @@ async def run_validation(request_id: str = Path(...)) -> ApiEnvelope:
         job.parsed = ParsedBundle.model_validate(parsed).model_dump()
 
     job.result = orchestrator.evaluate(job)
-    job.result = ValidationResult.model_validate(job.result).model_dump()
+    job.result = ValidationResult.model_validate(job.result).model_dump(by_alias=True)
     db.insert_rule_results(job.bid_id, job.result.get("results", []))
     db.update_bid_status(job.bid_id, job.result["overall_status"])
     job.stage = orchestrator.Stage.VALIDATION_COMPLETE

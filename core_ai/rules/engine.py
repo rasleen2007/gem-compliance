@@ -1,7 +1,7 @@
 """Deterministic rule engine (Stage 3). Emits contract 5 (validation_result).
 
 Consumes a **parsed_document** bundle (contract 3) produced by the NLP stage,
-evolving the Phase P0 EMD baseline into three new operator families:
+evolving the Phase P0 EMD baseline into four operator families:
 
   Rule-DATE  -> date_after / date_before : extracted document date vs a target
                 tender deadline (e.g. certificate validity, incorporation date).
@@ -9,6 +9,10 @@ evolving the Phase P0 EMD baseline into three new operator families:
                 entity tokens, table refs, or keyword groupings.
   Rule-FIN   -> numeric compare on target `TURNOVER` (multi-line financial
                 year turnover parse from the NLP entity index or text scan).
+  Rule-XCHK  -> cross_check              : multi-document identity reconciliation
+                (GSTIN/PAN/CIN/COMPANY_NAME/... must agree across files); the
+                bundle's `cross_checks` conflicts become fail verdicts with the
+                per-file discrepancy arrays as evidence.
 
 Server-level resilience is preserved: per-rule exceptions degrade to `error`
 status and never abort the batch. All operators run locally — LLM judge remains
@@ -153,6 +157,8 @@ class RuleEngine:
                 verdict = self._eval_contains(rule, parsed)
             elif operator == "regex":
                 verdict = self._eval_regex(rule, parsed)
+            elif operator == "cross_check":
+                verdict = self._eval_cross_check(rule, parsed)
             elif operator == "llm_judge" and self.llm_enabled:
                 verdict = self._eval_llm(rule, parsed)
             else:
@@ -298,6 +304,46 @@ class RuleEngine:
             "confidence": 0.9,
             "suggested_action": "none" if found else "attach_missing_doc",
         }
+
+    def _eval_cross_check(self, rule: dict, parsed: dict) -> dict:
+        """cross_check: fail when an identity field disagrees across files.
+
+        `rule.target` selects the field (GSTIN | PAN | CIN | COMPANY_NAME |
+        COMPANY_REGISTRATION_NUMBER | INCORPORATION_DATE). The parsed bundle's
+        `cross_checks` / `has_cross_check_conflict` entries are filtered to
+        that field; any conflicting record yields a `fail` verdict carrying the
+        per-file discrepancy arrays as evidence for the review panel.
+        """
+        target = str(rule.get("target", "")).upper().replace(" ", "_")
+        conflicts = [
+            record for record in parsed.get("cross_checks", [])
+            if str(record.get("field", "")).upper() == target
+        ]
+        document_count = len(parsed.get("documents", []))
+        base = {"rule_id": rule.get("rule_id"), "source_span": None,
+                "file_id": None, "table_id": None}
+
+        if not conflicts:
+            return {**base, "status": "pass",
+                    "evidence": {"found": f"{target} consistent across all documents",
+                                 "source_span": None, "file_id": None, "table_id": None,
+                                 "distinct_values": None, "conflict_records": [],
+                                 "cross_check_conflict": False},
+                    "reason": f"{target} consistent across {document_count} document(s)",
+                    "confidence": 0.9, "suggested_action": "none"}
+
+        conflict = conflicts[0]
+        distinct = conflict.get("distinct_values", [])
+        return {**base, "status": "fail",
+                "evidence": {"found": conflict.get(
+                        "note", f"{target} differs across documents"),
+                             "source_span": None, "file_id": None, "table_id": None,
+                             "distinct_values": distinct,
+                             "conflict_records": conflicts,
+                             "cross_check_conflict": True},
+                "reason": conflict.get(
+                        "note", f"{target} differs across documents"),
+                "confidence": 0.95, "suggested_action": "manual_review"}
 
     def _eval_regex(self, rule: dict, parsed: dict) -> dict:
         pattern = rule.get("expected_value", "")
@@ -446,7 +492,7 @@ class RuleEngine:
             "tender_id": parsed.get("tender_id") or tender_id,
             "bid_id": parsed.get("bid_id"),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "engine_version": "1.1",
+            "engine_version": "1.2",
             "results": results,
             "overall_status": overall,
             "score": {

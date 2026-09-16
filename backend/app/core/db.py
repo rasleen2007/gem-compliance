@@ -221,8 +221,9 @@ def get_events(request_id: str) -> list[dict]:
 def _seed_demo_rules(conn: sqlite3.Connection) -> None:
     """Phase P1 demo rule pack for the reference tender (contract 4 values).
 
-    Covers all four rule families: EMD amount, document presence (GSTIN/PAN),
-    date comparison (certificate validity / incorporation), financial turnover.
+    Covers all five rule families: EMD amount, document presence (GSTIN/PAN),
+    date comparison (certificate validity / incorporation), financial turnover,
+    and multi-document identity cross-checking (Rule-XCHK).
     """
     threshold = settings.emd_threshold
     demo_rules = [
@@ -245,6 +246,20 @@ def _seed_demo_rules(conn: sqlite3.Connection) -> None:
         # --- Rule-FIN: past-years turnover threshold -------------------------
         ("RULE-FIN-001", "Financial", "mandatory", "financial_bid", "TURNOVER", ">=", "10000000",
          "Latest financial year turnover must be at least 1,00,00,000 INR (1 crore)"),
+        # --- Rule-XCHK: multi-document identity reconciliation --------------
+        ("RULE-XCHK-001", "Cross-Check", "blocking", "all", "COMPANY_NAME", "cross_check", None,
+         "Company legal name must match across every uploaded document "
+         "(financial spreadsheet vs Certificate of Incorporation)"),
+        ("RULE-XCHK-002", "Cross-Check", "blocking", "all", "PAN", "cross_check", None,
+         "PAN must be identical across every uploaded document"),
+        ("RULE-XCHK-003", "Cross-Check", "blocking", "all", "GSTIN", "cross_check", None,
+         "GSTIN must be identical across every uploaded document"),
+        ("RULE-XCHK-004", "Cross-Check", "mandatory", "all", "CIN", "cross_check", None,
+         "CIN (Certificate of Incorporation) must match on all referenced documents"),
+        ("RULE-XCHK-005", "Cross-Check", "mandatory", "all", "COMPANY_REGISTRATION_NUMBER", "cross_check", None,
+         "Company registration number must agree across all uploaded documents"),
+        ("RULE-XCHK-006", "Cross-Check", "advisory", "all", "INCORPORATION_DATE", "cross_check", None,
+         "Incorporation date must agree across all uploaded documents"),
     ]
     for rule_id, category, severity, element, target, operator, expected, description in demo_rules:
         conn.execute(

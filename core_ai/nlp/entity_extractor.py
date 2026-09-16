@@ -9,9 +9,13 @@ Consumes an (optionally layout-enriched) `ocr_extraction`, segments it via
                        entities[], tables_normalized[], summary, confidence }
 
 Extracted field vocabulary (used by rule `target` values):
-    GSTIN, PAN, CIN, COMPANY_REGISTRATION_NUMBER,
-    CERT_VALIDITY (certificate/doc validity date),
-    INCORPORATION_DATE, TURNOVER_<FY> (financial year turnover amounts).
+        GSTIN, PAN, CIN, COMPANY_REGISTRATION_NUMBER, COMPANY_NAME,
+        CERT_VALIDITY (certificate/doc validity date),
+        INCORPORATION_DATE, TURNOVER_<FY> (financial year turnover amounts).
+
+    Identity fields (GSTIN, PAN, CIN, COMPANY_REGISTRATION_NUMBER,
+    COMPANY_NAME, INCORPORATION_DATE) are reconciled across every uploaded
+    file in `to_parsed_document`; disagreements surface as `cross_checks`.
 
 All extraction is local regex + keyword vocabulary — no external APIs.
 """
@@ -34,15 +38,16 @@ REG_NO_RE = re.compile(r"(?i)\b(?:regn|regd|registration)\s*(?:no\.?|number)?\s*
 DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
 #: legal/business company name (identity field compared ACROSS documents)
 COMPANY_NAME_RE = re.compile(
-    r"(?:
-       (?:name\s+of\s+(?:the\s+)?(?:company|bidder|supplier|firm)
-        |company\s+name|name\s*[:.]\s*name))
-       \s*[:.\- ]*\s*
-       ([A-Z][A-Za-z0-9&' .,()\-]{3,79})
-     | m/s\s*[:.\- ]*\s*([A-Z][A-Za-z0-9&' .,()\-]{3,79})
-     | (?:incorporated\s+(?:as|under)|trading\s+as)\s*[:.\- ]*\s*
-       ([A-Z][A-Za-z0-9&' .,()\-]{3,79})",
-    re.IGNORECASE,
+    r"""(?: name \s+ of \s+ (?: the \s+ )? (?: company | bidder | supplier | firm )
+          | company \s+ name
+          | name \s* [:.] \s* name )
+        \s* [:.\- ]* \s*
+        ([A-Z][A-Za-z0-9&' .,()\-]{3,79})
+      | m/s \s* [:.\- ]* \s* ([A-Z][A-Za-z0-9&' .,()\-]{3,79})
+      | (?: incorporated \s+ (?: as | under ) | trading \s+ as )
+        \s* [:.\- ]* \s* ([A-Z][A-Za-z0-9&' .,()\-]{3,79})
+     """,
+    re.IGNORECASE | re.VERBOSE,
 )
 #: canonical identity fields reconciled across all uploaded files (cross-check)
 CROSS_CHECK_FIELDS = (
@@ -147,6 +152,90 @@ def _turnovers(page_no: int, text: str) -> list[dict]:
     return out
 
 
+#: identity-keyword boundary — company-name captures never swallow these
+_IDENTITY_BOUNDARY_RE = re.compile(
+    r"\b(?:pan|gstin|cin|registration|regn\.?|no\.?)\b|"
+    r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b",
+    re.IGNORECASE,
+)
+#: normalization for identity comparison: drop periods/hyphens, fold whitespace
+_NAME_NORMALIZE_RE = re.compile(r"[\s.\\-]+")
+
+
+def _company_name(page_no: int, text: str) -> list[dict]:
+    """Extract a legal/business company name (cross-document identity field).
+
+    Matches the COMPANY_NAME_RE alternatives: "Name of the Company/Company
+    Name", "M/s <name>", and "incorporated as / trading as" label windows.
+    Captures stop at identity tokens (PAN/GSTIN/...) and normalization removes
+    punctuation variants ("PVT LTD" vs "PVT. LTD.") so the cross-check pass can
+    reconcile the name on a certificate with the one on a financial spreadsheet.
+    """
+    out: list[dict] = []
+    for match in COMPANY_NAME_RE.finditer(text):
+        raw = next((group for group in match.groups() if group), None)
+        if not raw:
+            continue
+        boundary = _IDENTITY_BOUNDARY_RE.search(raw)
+        if boundary:
+            raw = raw[:boundary.start()]
+        name = raw.strip().rstrip(".,;: ")
+        if len(name) < 4:
+            continue
+        out.append({
+            "entity": "COMPANY_NAME",
+            "value": name,
+            "normalized_value": _NAME_NORMALIZE_RE.sub(" ", name.upper()).strip(),
+            "confidence": 0.86,
+            "source_span": _span(page_no, match.start(), match.end()),
+        })
+    return out
+
+
+def _cross_check_documents(documents: list[dict]) -> list[dict]:
+    """Reconcile identity fields across every uploaded document.
+
+    Fields compared (via `normalized_value`): CROSS_CHECK_FIELDS. Any field
+    whose normalized value disagrees between two or more documents yields one
+    `conflict` record carrying the per-file values as evidence for the rules
+    engine's `cross_check` operator (e.g. PAN on the financial spreadsheet vs
+    the PAN stamped on the Certificate of Incorporation).
+    """
+    by_field: dict[str, list[dict]] = {}
+    for document in documents:
+        file_id = document.get("file_id")
+        for entity in document.get("entities", []):
+            name = entity.get("entity")
+            if name not in CROSS_CHECK_FIELDS:
+                continue
+            normalized = entity.get("normalized_value")
+            if not normalized:
+                continue
+            by_field.setdefault(name, []).append({
+                "file_id": file_id,
+                "doc_role": document.get("doc_role"),
+                "value": entity.get("value"),
+                "normalized_value": normalized,
+                "confidence": entity.get("confidence", 0.0),
+                "source_span": entity.get("source_span"),
+            })
+
+    cross_checks: list[dict] = []
+    for field, entries in by_field.items():
+        distinct = {entry["normalized_value"] for entry in entries}
+        if len(distinct) <= 1:
+            continue
+        cross_checks.append({
+            "field": field,
+            "status": "conflict",
+            "values": entries,
+            "distinct_values": sorted(str(value) for value in distinct),
+            "note": (f"{field} disagrees across {len(entries)} document(s): "
+                     f"{', '.join(str(value) for value in sorted(distinct))}"),
+        })
+    return cross_checks
+
+
 # --------------------------------------------------------------------------
 # Document assembler
 # --------------------------------------------------------------------------
@@ -166,6 +255,7 @@ def _extract_document(document: dict, sections: list[dict]) -> dict:
         entities.extend(_near_keyword(page_no, text, _VALIDITY_KEYWORDS, DATE_RE, "CERT_VALIDITY"))
         entities.extend(_near_keyword(page_no, text, _INCORP_KEYWORDS, DATE_RE, "INCORPORATION_DATE"))
         entities.extend(_turnovers(page_no, text))
+        entities.extend(_company_name(page_no, text))
 
     # key-value pairs: one per distinct entity kind, first occurrence
     key_value_pairs: list[dict] = []
@@ -220,10 +310,14 @@ def to_parsed_document(extraction: dict, request_id: str, tender_id: str, bid_id
         file_id = document.get("file_id")
         documents.append(_extract_document(document, sections_map.get(file_id, [])))
 
+    cross_checks = _cross_check_documents(documents)
+
     return {
         "request_id": request_id,
         "tender_id": tender_id,
         "bid_id": bid_id,
         "status": extraction.get("status", "completed"),
+        "has_cross_check_conflict": bool(cross_checks),
+        "cross_checks": cross_checks,
         "documents": documents,
     }

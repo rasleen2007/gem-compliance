@@ -43,7 +43,7 @@
       "properties": {
         "rule_id": { "type": "string" },
         "status": { "type": "string", "enum": ["pass", "fail", "warn", "skip", "error"] },
-        "evidence": {
+          "evidence": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -58,7 +58,10 @@
               }
             },
             "file_id": { "type": "string", "format": "uuid" },
-            "table_id": { "type": "string" }
+            "table_id": { "type": "string" },
+            "distinct_values": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Normalized distinct values when a cross_check field disagrees across documents" },
+            "conflict_records": { "type": ["array", "null"], "items": { "type": "object" }, "description": "Full per-document conflict records from the cross-check pass" },
+            "cross_check_conflict": { "type": "boolean", "description": "True when a cross_check operator detected a multi-document identity mismatch" }
           }
         },
         "reason": { "type": "string", "description": "Human-readable justification" },

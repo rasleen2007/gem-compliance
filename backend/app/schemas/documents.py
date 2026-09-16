@@ -136,4 +136,6 @@ class ParsedBundle(BaseModel):
     tender_id: str | None = None
     bid_id: str | None = None
     status: str = "completed"
+    has_cross_check_conflict: bool = False
+    cross_checks: list[dict] = Field(default_factory=list)
     documents: list[ParsedDocument]

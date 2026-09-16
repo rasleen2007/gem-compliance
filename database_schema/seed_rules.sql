@@ -32,4 +32,24 @@ INSERT OR IGNORE INTO validation_rules
 -- Financial turnover (Rule-FIN: multi-line FY parse)
 ('RULE-FIN-001', 'GeM/2026/B/123456', 'Financial',
  'Latest financial year turnover must be at least 1,00,00,000 INR (1 crore)', 'mandatory', 'financial_bid',
- 'TURNOVER', '>=', '10000000', 'Multi-line financial-year + amount extraction');
+ 'TURNOVER', '>=', '10000000', 'Multi-line financial-year + amount extraction'),
+
+-- Multi-document identity cross-check (Rule-XCHK)
+('RULE-XCHK-001', 'GeM/2026/B/123456', 'Cross-Check',
+ 'Company legal name must match across every uploaded document (financial spreadsheet vs Certificate of Incorporation)', 'blocking', 'all',
+ 'COMPANY_NAME', 'cross_check', NULL, 'Reconcile COMPANY_NAME normalized values across all files'),
+('RULE-XCHK-002', 'GeM/2026/B/123456', 'Cross-Check',
+ 'PAN must be identical across every uploaded document', 'blocking', 'all',
+ 'PAN', 'cross_check', NULL, 'Reconcile PAN normalized values across all files'),
+('RULE-XCHK-003', 'GeM/2026/B/123456', 'Cross-Check',
+ 'GSTIN must be identical across every uploaded document', 'blocking', 'all',
+ 'GSTIN', 'cross_check', NULL, 'Reconcile GSTIN normalized values across all files'),
+('RULE-XCHK-004', 'GeM/2026/B/123456', 'Cross-Check',
+ 'CIN (Certificate of Incorporation) must match on all referenced documents', 'mandatory', 'all',
+ 'CIN', 'cross_check', NULL, 'Reconcile CIN normalized values across all files'),
+('RULE-XCHK-005', 'GeM/2026/B/123456', 'Cross-Check',
+ 'Company registration number must agree across all uploaded documents', 'mandatory', 'all',
+ 'COMPANY_REGISTRATION_NUMBER', 'cross_check', NULL, 'Reconcile incorporation registration number across all files'),
+('RULE-XCHK-006', 'GeM/2026/B/123456', 'Cross-Check',
+ 'Incorporation date must agree across all uploaded documents', 'advisory', 'all',
+ 'INCORPORATION_DATE', 'cross_check', NULL, 'Reconcile incorporation date across all files');
